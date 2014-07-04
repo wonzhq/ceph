@@ -83,6 +83,19 @@ def get_lines(filename):
     return lines
 
 
+def cat_file(level, filename):
+    if level < logging.getLogger().getEffectiveLevel():
+        return
+    print "File: " + filename
+    with open(filename, "r") as f:
+        while True:
+            line = f.readline().rstrip('\n')
+            if not line:
+                break
+            print line
+    print "<EOF>"
+
+
 def vstart(new):
     print "vstarting....",
     OPT = new and "-n" or ""
@@ -311,7 +324,7 @@ def main():
     ERRORS += test_failure(cmd, "stdin is a tty and no --file option specified")
 
     # Test --type list and generate json for all objects
-    print "Testing --type list by generating json for all objects"
+    print "Test --type list by generating json for all objects"
     TMPFILE = r"/tmp/tmp.{pid}".format(pid=pid)
     ALLPGS = OBJREPPGS + OBJECPGS
     for pg in ALLPGS:
@@ -330,7 +343,7 @@ def main():
     JSONOBJ = sorted(set(lines))
 
     # Test get-bytes
-    print "Testing get-bytes and set-bytes"
+    print "Test get-bytes and set-bytes"
     for basename in db.keys():
         file = os.path.join(DATADIR, basename)
         JSON = [l for l in JSONOBJ if l.find("\"" + basename + "\"") != -1]
@@ -361,10 +374,10 @@ def main():
                 ret = call(cmd, shell=True)
                 if ret != 0:
                     logging.error("Data from get-bytes differ")
-                    print "Got:"
-                    cat_file(GETNAME)
-                    print "Expected:"
-                    cat_file(file)
+                    logging.debug("Got:")
+                    cat_file(logging.DEBUG, GETNAME)
+                    logging.debug("Expected:")
+                    cat_file(logging.DEBUG, file)
                     ERRORS += 1
                 fd = open(SETNAME, "w")
                 data = "put-bytes going into {file}\n".format(file=file)
@@ -391,10 +404,10 @@ def main():
                 ret = call(cmd, shell=True)
                 if ret != 0:
                     logging.error("Data after set-bytes differ")
-                    print "Got:"
-                    cat_file(TESTNAME)
-                    print "Expected:"
-                    cat_file(SETNAME)
+                    logging.debug("Got:")
+                    cat_file(logging.DEBUG, TESTNAME)
+                    logging.debug("Expected:")
+                    cat_file(logging.DEBUG, SETNAME)
                     ERRORS += 1
                 fd = open(file, "r")
                 cmd = (CFSD_PREFIX + "--pgid {pg} '{json}' set-bytes").format(osd=osd, pg=pg, json=JSON)
@@ -417,7 +430,7 @@ def main():
     except:
         pass
 
-    print "Testing list-attrs get-attr"
+    print "Test list-attrs get-attr"
     ATTRFILE = r"/tmp/attrs.{pid}".format(pid=pid)
     VALFILE = r"/tmp/val.{pid}".format(pid=pid)
     for basename in db.keys():
@@ -470,7 +483,7 @@ def main():
                     logging.error("Not all keys found, remaining keys:")
                     print values
 
-    print "Checking pg info"
+    print "Test pg info"
     for pg in ALLREPPGS + ALLECPGS:
         for osd in get_osds(pg, OSDDIR):
             cmd = (CFSD_PREFIX + "--type info --pgid {pg} | grep '\"pgid\": \"{pg}\"'").format(osd=osd, pg=pg)
@@ -480,7 +493,7 @@ def main():
                 logging.error("Getting info failed for pg {pg} from {osd} with {ret}".format(pg=pg, osd=osd, ret=ret))
                 ERRORS += 1
 
-    print "Checking pg logging"
+    print "Test pg logging"
     for pg in ALLREPPGS + ALLECPGS:
         for osd in get_osds(pg, OSDDIR):
             tmpfd = open(TMPFILE, "w")
@@ -507,7 +520,7 @@ def main():
     except:
         pass
 
-    print "Checking pg export"
+    print "Test pg export"
     EXP_ERRORS = 0
     os.mkdir(TESTDIR)
     for osd in [f for f in os.listdir(OSDDIR) if os.path.isdir(os.path.join(OSDDIR, f)) and string.find(f, "osd") == 0]:
@@ -525,7 +538,7 @@ def main():
 
     ERRORS += EXP_ERRORS
 
-    print "Checking pg removal"
+    print "Test pg removal"
     RM_ERRORS = 0
     for pg in ALLREPPGS + ALLECPGS:
         for osd in get_osds(pg, OSDDIR):
@@ -540,7 +553,7 @@ def main():
 
     IMP_ERRORS = 0
     if EXP_ERRORS == 0 and RM_ERRORS == 0:
-        print "Checking pg import"
+        print "Test pg import"
         for osd in [f for f in os.listdir(OSDDIR) if os.path.isdir(os.path.join(OSDDIR, f)) and string.find(f, "osd") == 0]:
             dir = os.path.join(TESTDIR, osd)
             for pg in [f for f in os.listdir(dir) if os.path.isfile(os.path.join(dir, f))]:
@@ -559,7 +572,7 @@ def main():
     call("/bin/rm -rf {dir}".format(dir=TESTDIR), shell=True)
 
     if EXP_ERRORS == 0 and RM_ERRORS == 0 and IMP_ERRORS == 0:
-        print "Checking replicated import data"
+        print "Verify replicated import data"
         for file in [f for f in os.listdir(DATADIR) if f.find(REP_NAME) == 0]:
             path = os.path.join(DATADIR, file)
             tmpfd = open(TMPFILE, "w")
@@ -585,14 +598,13 @@ def main():
         vstart(new=False)
         wait_for_health()
 
-        print "Checking erasure coded import data"
+        print "Verify erasure coded import data"
         for file in [f for f in os.listdir(DATADIR) if f.find(EC_NAME) == 0]:
             path = os.path.join(DATADIR, file)
             try:
                 os.unlink(TMPFILE)
             except:
                 pass
-            # print "Checking {file}".format(file=file)
             cmd = "./rados -p {pool} get {file} {out}".format(pool=EC_POOL, file=file, out=TMPFILE)
             logging.debug(cmd)
             call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
