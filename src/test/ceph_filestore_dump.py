@@ -7,6 +7,9 @@ import time
 import sys
 import re
 import string
+import logging
+
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.WARNING)
 
 
 def wait_for_health():
@@ -92,19 +95,20 @@ def test_failure(cmd, errmsg):
     TMPFILE = r"/tmp/tmp.{pid}".format(pid=os.getpid())
     tmpfd = open(TMPFILE, "w")
 
+    logging.debug(cmd)
     ret = call(cmd, shell=True, stdin=ttyfd, stdout=ttyfd, stderr=tmpfd)
     ttyfd.close()
     tmpfd.close()
     if ret == 0:
-        print "Should have failed, but got exit 0"
+        logging.error("Should have failed, but got exit 0")
         return 1
     lines = get_lines(TMPFILE)
     line = lines[0]
     if line == errmsg:
-        print "Correctly failed with message \"" + line + "\""
+        logging.info("Correctly failed with message \"" + line + "\"")
         return 0
     else:
-        print "Bad message to stderr \"" + line + "\""
+        logging.error("Bad message to stderr \"" + line + "\"")
         return 1
 
 
@@ -128,16 +132,20 @@ def main():
     wait_for_health()
 
     cmd = "./ceph osd pool create {pool} 12 12 replicated".format(pool=REP_POOL)
+    logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
     REPID = get_pool_id(REP_POOL, nullfd)
 
     print "Created Replicated pool #{repid}".format(repid=REPID)
 
     cmd = "./ceph osd erasure-code-profile set testprofile ruleset-failure-domain=osd"
+    logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
     cmd = "./ceph osd erasure-code-profile get testprofile"
+    logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
     cmd = "./ceph osd pool create {pool} 12 12 erasure testprofile".format(pool=EC_POOL)
+    logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
     ECID = get_pool_id(EC_POOL, nullfd)
 
@@ -145,6 +153,7 @@ def main():
 
     print "Creating {objs} objects in replicated pool".format(objs=NUM_OBJECTS)
     cmd = "mkdir -p {datadir}".format(datadir=DATADIR)
+    logging.debug(cmd)
     call(cmd, shell=True)
 
     db = {}
@@ -155,6 +164,7 @@ def main():
         DDNAME = os.path.join(DATADIR, NAME)
 
         cmd = "rm -f " + DDNAME
+        logging.debug(cmd)
         call(cmd, shell=True)
 
         dataline = xrange(10000)
@@ -165,7 +175,11 @@ def main():
         fd.close()
 
         cmd = "./rados -p {pool} put {name} {ddname}".format(pool=REP_POOL, name=NAME, ddname=DDNAME)
-        call(cmd, shell=True, stderr=nullfd)
+        logging.debug(cmd)
+        ret = call(cmd, shell=True, stderr=nullfd)
+        if ret != 0:
+            logging.critical("Replicated pool creation failed with {ret}".format(ret=ret))
+            sys.exit(1)
 
         db[NAME] = {}
 
@@ -177,16 +191,22 @@ def main():
             mykey = "key{i}-{k}".format(i=i, k=k)
             myval = "val{i}-{k}".format(i=i, k=k)
             cmd = "./rados -p {pool} setxattr {name} {key} {val}".format(pool=REP_POOL, name=NAME, key=mykey, val=myval)
-            # print cmd
-            call(cmd, shell=True)
+            logging.debug(cmd)
+            ret = call(cmd, shell=True)
+            if ret != 0:
+                logging.error("setxattr failed with {ret}".format(ret=ret))
+                ERRORS += 1
             db[NAME]["xattr"][mykey] = myval
 
         # Create omap header in all objects but REPobject1
         if i != 1:
             myhdr = "hdr{i}".format(i=i)
             cmd = "./rados -p {pool} setomapheader {name} {hdr}".format(pool=REP_POOL, name=NAME, hdr=myhdr)
-            # print cmd
-            call(cmd, shell=True)
+            logging.debug(cmd)
+            ret = call(cmd, shell=True)
+            if ret != 0:
+                logging.critical("setomapheader failed with {ret}".format(ret=ret))
+                ERRORS += 1
             db[NAME]["omapheader"] = myhdr
 
         db[NAME]["omap"] = {}
@@ -196,8 +216,10 @@ def main():
             mykey = "okey{i}-{k}".format(i=i, k=k)
             myval = "oval{i}-{k}".format(i=i, k=k)
             cmd = "./rados -p {pool} setomapval {name} {key} {val}".format(pool=REP_POOL, name=NAME, key=mykey, val=myval)
-            # print cmd
-            call(cmd, shell=True)
+            logging.debug(cmd)
+            ret = call(cmd, shell=True)
+            if ret != 0:
+                logging.critical("setomapval failed with {ret}".format(ret=ret))
             db[NAME]["omap"][mykey] = myval
 
     print "Creating {objs} objects in erasure coded pool".format(objs=NUM_OBJECTS)
@@ -207,6 +229,7 @@ def main():
         DDNAME = os.path.join(DATADIR, NAME)
 
         cmd = "rm -f " + DDNAME
+        logging.debug(cmd)
         call(cmd, shell=True)
 
         fd = open(DDNAME, "w")
@@ -216,7 +239,11 @@ def main():
         fd.close()
 
         cmd = "./rados -p {pool} put {name} {ddname}".format(pool=EC_POOL, name=NAME, ddname=DDNAME)
-        call(cmd, shell=True, stderr=nullfd)
+        logging.debug(cmd)
+        ret = call(cmd, shell=True, stderr=nullfd)
+        if ret != 0:
+            logging.critical("Erasure coded pool creation failed with {ret}".format(ret=ret))
+            sys.exit(1)
 
         db[NAME] = {}
 
@@ -228,8 +255,11 @@ def main():
             mykey = "key{i}-{k}".format(i=i, k=k)
             myval = "val{i}-{k}".format(i=i, k=k)
             cmd = "./rados -p {pool} setxattr {name} {key} {val}".format(pool=EC_POOL, name=NAME, key=mykey, val=myval)
-            # print cmd
-            call(cmd, shell=True)
+            logging.debug(cmd)
+            ret = call(cmd, shell=True)
+            if ret != 0:
+                logging.error("setxattr failed with {ret}".format(ret=ret))
+                ERRORS += 1
             db[NAME]["xattr"][mykey] = myval
 
         # Omap isn't supported in EC pools
@@ -238,6 +268,10 @@ def main():
     # print db
 
     call("./stop.sh", stderr=nullfd)
+
+    if ERRORS:
+        logging.critical("Unable to set-up test")
+        sys.exit(1)
 
     ALLREPPGS = get_pgs(OSDDIR, REPID)
     # print ALLREPPGS
@@ -255,6 +289,7 @@ def main():
     ONEOSD = osds[0]
     # print ONEOSD
 
+    print "Test invalid parameters"
     # On export can't use stdout to a terminal
     cmd = (CFSD_PREFIX + "--type export --pgid {pg}").format(osd=ONEOSD, pg=ONEPG)
     ERRORS += test_failure(cmd, "stdout is a tty and no --file option specified")
@@ -284,9 +319,10 @@ def main():
         for osd in OSDS:
             cmd = (CFSD_PREFIX + "--type list --pgid {pg}").format(osd=osd, pg=pg)
             tmpfd = open(TMPFILE, "a")
+            logging.debug(cmd)
             ret = call(cmd, shell=True, stdout=tmpfd)
             if ret != 0:
-                print "Bad exit status {ret} from --type list request".format(ret=ret)
+                logging.error("Bad exit status {ret} from --type list request".format(ret=ret))
                 ERRORS += 1
 
     tmpfd.close()
@@ -315,16 +351,16 @@ def main():
                 except:
                     pass
                 cmd = (CFSD_PREFIX + " --pgid {pg} '{json}' get-bytes {fname}").format(osd=osd, pg=pg, json=JSON, fname=GETNAME)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True)
                 if ret != 0:
-                    print cmd
-                    print "Bad exit status {ret}".format(ret=ret)
+                    logging.error("Bad exit status {ret}".format(ret=ret))
                     ERRORS += 1
                     continue
                 cmd = "diff -q {file} {getfile}".format(file=file, getfile=GETNAME)
                 ret = call(cmd, shell=True)
                 if ret != 0:
-                    print "Data from get-bytes differ"
+                    logging.error("Data from get-bytes differ")
                     print "Got:"
                     cat_file(GETNAME)
                     print "Expected:"
@@ -336,32 +372,36 @@ def main():
                 fd.close()
                 fd = open(SETNAME, "r")
                 cmd = (CFSD_PREFIX + "--pgid {pg} '{json}' set-bytes -").format(osd=osd, pg=pg, json=JSON)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True, stdin=fd)
                 fd.close()
                 if ret != 0:
-                    print "Bad exit status {ret} from set-bytes".format(ret=ret)
+                    logging.error("Bad exit status {ret} from set-bytes".format(ret=ret))
                     ERRORS += 1
                 fd = open(TESTNAME, "w")
                 cmd = (CFSD_PREFIX + "--pgid {pg} '{json}' get-bytes -").format(osd=osd, pg=pg, json=JSON)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True, stdout=fd)
                 fd.close()
                 if ret != 0:
-                    print cmd
-                    print "Bad exit status {ret} from get-bytes".format(ret=ret)
+                    logging.error("Bad exit status {ret} from get-bytes".format(ret=ret))
                     ERRORS += 1
                 cmd = "diff -q {setfile} {testfile}".format(setfile=SETNAME, testfile=TESTNAME)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True)
                 if ret != 0:
-                    print "Data after set-bytes differ"
+                    logging.error("Data after set-bytes differ")
                     print "Got:"
                     cat_file(TESTNAME)
                     print "Expected:"
                     cat_file(SETNAME)
+                    ERRORS += 1
                 fd = open(file, "r")
                 cmd = (CFSD_PREFIX + "--pgid {pg} '{json}' set-bytes").format(osd=osd, pg=pg, json=JSON)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True, stdin=fd)
                 if ret != 0:
-                    print "Bad exit status {ret} from set-bytes to restore object".format(ret=ret)
+                    logging.error("Bad exit status {ret} from set-bytes to restore object".format(ret=ret))
                     ERRORS += 1
 
     try:
@@ -394,11 +434,11 @@ def main():
                 fname = fname[0]
                 afd = open(ATTRFILE, "w")
                 cmd = (CFSD_PREFIX + "--pgid {pg} '{json}' list-attrs").format(osd=osd, pg=pg, json=JSON)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True, stdout=afd)
                 afd.close()
                 if ret != 0:
-                    print cmd
-                    print "Bad exit status {ret}".format(ret=ret)
+                    logging.error("list-attrs failed with {ret}".format(ret=ret))
                     ERRORS += 1
                     continue
                 keys = get_lines(ATTRFILE)
@@ -408,45 +448,47 @@ def main():
                         continue
                     key = key.strip("_")
                     if key not in values:
-                        print "The key {key} should be present".format(key=key)
+                        logging.error("The key {key} should be present".format(key=key))
                         ERRORS += 1
                         continue
                     exp = values.pop(key)
                     vfd = open(VALFILE, "w")
                     cmd = (CFSD_PREFIX + "--pgid {pg} '{json}' get-attr {key}").format(osd=osd, pg=pg, json=JSON, key="_" + key)
+                    logging.debug(cmd)
                     ret = call(cmd, shell=True, stdout=vfd)
                     vfd.close()
                     if ret != 0:
-                        print cmd
-                        print "Bad exit status {ret}".format(ret=ret)
+                        logging.error("get-attr failed with {ret}".format(ret=ret))
                         ERRORS += 1
                         continue
                     lines = get_lines(VALFILE)
                     val = lines[0]
                     if exp != val:
-                        print "For key {key} got value {got} instead of {expected}".format(key=key.strip("_"), got=val, expected=exp)
+                        logging.error("For key {key} got value {got} instead of {expected}".format(key=key.strip("_"), got=val, expected=exp))
                         ERRORS += 1
                 if len(values) != 0:
-                    print "Not all keys found, remaining keys:"
+                    logging.error("Not all keys found, remaining keys:")
                     print values
 
     print "Checking pg info"
     for pg in ALLREPPGS + ALLECPGS:
         for osd in get_osds(pg, OSDDIR):
             cmd = (CFSD_PREFIX + "--type info --pgid {pg} | grep '\"pgid\": \"{pg}\"'").format(osd=osd, pg=pg)
+            logging.debug(cmd)
             ret = call(cmd, shell=True, stdout=nullfd)
             if ret != 0:
-                print "FAILURE: getting info for pg {pg} from {osd}".format(pg=pg, osd=osd)
+                logging.error("Getting info failed for pg {pg} from {osd} with {ret}".format(pg=pg, osd=osd, ret=ret))
                 ERRORS += 1
 
-    print "Checking pg logs"
+    print "Checking pg logging"
     for pg in ALLREPPGS + ALLECPGS:
         for osd in get_osds(pg, OSDDIR):
             tmpfd = open(TMPFILE, "w")
             cmd = (CFSD_PREFIX + "--type log --pgid {pg}").format(osd=osd, pg=pg)
+            logging.debug(cmd)
             ret = call(cmd, shell=True, stdout=tmpfd)
             if ret != 0:
-                print "FAILURE: getting log for pg {pg} from {osd}".format(pg=pg, osd=osd)
+                logging.error("Getting log failed for pg {pg} from {osd} with {ret}".format(pg=pg, osd=osd, ret=ret))
                 ERRORS += 1
             HASOBJ = pg in OBJREPPGS + OBJECPGS
             MODOBJ = False
@@ -455,7 +497,7 @@ def main():
                     MODOBJ = True
                     break
             if HASOBJ != MODOBJ:
-                print "FAILURE: bad log for pg {pg} from {osd}".format(pg=pg, osd=osd)
+                logging.error("Bad log for pg {pg} from {osd}".format(pg=pg, osd=osd))
                 MSG = (HASOBJ and [""] or ["NOT "])[0]
                 print "Log should {msg}have a modify entry".format(msg=MSG)
                 ERRORS += 1
@@ -475,9 +517,10 @@ def main():
             mydir = os.path.join(TESTDIR, osd)
             fname = os.path.join(mydir, pg)
             cmd = (CFSD_PREFIX + "--type export --pgid {pg} --file {file}").format(osd=osd, pg=pg, file=fname)
+            logging.debug(cmd)
             ret = call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
             if ret != 0:
-                print "FAILURE: Exporting pg {pg} on {osd}".format(pg=pg, osd=osd)
+                logging.error("Exporting failed for pg {pg} on {osd} with {ret}".format(pg=pg, osd=osd, ret=ret))
                 EXP_ERRORS += 1
 
     ERRORS += EXP_ERRORS
@@ -487,9 +530,10 @@ def main():
     for pg in ALLREPPGS + ALLECPGS:
         for osd in get_osds(pg, OSDDIR):
             cmd = (CFSD_PREFIX + "--type remove --pgid {pg}").format(pg=pg, osd=osd)
+            logging.debug(cmd)
             ret = call(cmd, shell=True, stdout=nullfd)
             if ret != 0:
-                print "FAILURE: Removing pg {pg} on {osd}".format(pg=pg, osd=osd)
+                logging.error("Removing failed for pg {pg} on {osd} with {ret}".format(pg=pg, osd=osd, ret=ret))
                 RM_ERRORS += 1
 
     ERRORS += RM_ERRORS
@@ -502,15 +546,16 @@ def main():
             for pg in [f for f in os.listdir(dir) if os.path.isfile(os.path.join(dir, f))]:
                 file = os.path.join(dir, pg)
                 cmd = (CFSD_PREFIX + "--type import --file {file}").format(osd=osd, file=file)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True, stdout=nullfd)
                 if ret != 0:
-                    print cmd
-                    print "FAILURE: Importing from {file}".format(file=file)
+                    logging.error("Import failed from {file} with {ret}".format(file=file, ret=ret))
                     IMP_ERRORS += 1
     else:
-        print "SKIPPING IMPORT TESTS DUE TO PREVIOUS FAILURES"
+        logging.warning("SKIPPING IMPORT TESTS DUE TO PREVIOUS FAILURES")
 
     ERRORS += IMP_ERRORS
+    logging.debug(cmd)
     call("/bin/rm -rf {dir}".format(dir=TESTDIR), shell=True)
 
     if EXP_ERRORS == 0 and RM_ERRORS == 0 and IMP_ERRORS == 0:
@@ -519,17 +564,22 @@ def main():
             path = os.path.join(DATADIR, file)
             tmpfd = open(TMPFILE, "w")
             cmd = "find {dir} -name '{file}_*'".format(dir=OSDDIR, file=file)
+            logging.debug(cmd)
             ret = call(cmd, shell=True, stdout=tmpfd)
+            if ret:
+                logging.critical("INTERNAL ERROR")
+                sys.exit(1)
             tmpfd.close()
             obj_locs = get_lines(TMPFILE)
             if len(obj_locs) == 0:
-                print "Can't find imported object {name}".format(name=file)
+                logging.error("Can't find imported object {name}".format(name=file))
                 ERRORS += 1
             for obj_loc in obj_locs:
                 cmd = "diff -q {src} {obj_loc}".format(src=path, obj_loc=obj_loc)
+                logging.debug(cmd)
                 ret = call(cmd, shell=True)
                 if ret != 0:
-                    print "FAILURE: {file} data no imported properly into {obj}".format(file=file, obj=obj_loc)
+                    logging.error("{file} data not imported properly into {obj}".format(file=file, obj=obj_loc))
                     ERRORS += 1
 
         vstart(new=False)
@@ -544,11 +594,13 @@ def main():
                 pass
             # print "Checking {file}".format(file=file)
             cmd = "./rados -p {pool} get {file} {out}".format(pool=EC_POOL, file=file, out=TMPFILE)
+            logging.debug(cmd)
             call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
             cmd = "diff -q {src} {result}".format(src=path, result=TMPFILE)
+            logging.debug(cmd)
             ret = call(cmd, shell=True)
             if ret != 0:
-                print "FAILURE: {file} data not imported properly".format(file=file)
+                logging.error("{file} data not imported properly".format(file=file))
                 ERRORS += 1
             try:
                 os.unlink(TMPFILE)
@@ -557,7 +609,7 @@ def main():
 
         call("./stop.sh", stderr=nullfd)
     else:
-        print "SKIPPING CHECKING IMPORT DATA DUE TO PREVIOUS FAILURES"
+        logging.warning("SKIPPING CHECKING IMPORT DATA DUE TO PREVIOUS FAILURES")
 
     call("/bin/rm -rf {dir}".format(dir=DATADIR), shell=True)
 
