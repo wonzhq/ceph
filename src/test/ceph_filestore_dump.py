@@ -13,8 +13,9 @@ import logging
 logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.WARNING)
 
 
-def test_get_pgs(statdict, ID, EC=False):
-    PGS = [str(p["pgid"]) for p in statdict["pg_stats"] if p["pgid"].find(ID + ".") == 0]
+def get_pgs_from_dict(statdict, ID, EC=False):
+    # Get unsharded pgs
+    PGS = [str(p["pgid"]) for p in statdict["pg_stats"] if p["pgid"].find(str(ID) + ".") == 0]
     if EC:
         ORIGPGS = list(PGS)
         PGS = []
@@ -27,23 +28,20 @@ def test_get_pgs(statdict, ID, EC=False):
     return PGS
 
 
-def dropshard(pgs):
-    """Take a list of pgs which may be in #.#s# format and drop the "s#"
-
-    Returns a unique list of the pgs"""
-    return list(set([l.split("s")[0] for l in pgs]))
-
-
-def test_get_osds(statdict, inpgs):
+def get_osds_from_dict(statdict, pgs):
     """Given a pg stat dictionary, return a list of OSDs which store that pg
 
     Return list of strings in "osd#" format"""
-    pgs = dropshard(inpgs)
     osds = []
-    for pgdict in statdict["pg_stats"]:
-        if pgdict["pgid"] in pgs:
-            assert(pgdict["state"] == "active+clean")
-            osds += set(pgdict["acting"])
+    for pg in pgs:
+        for pgdict in statdict["pg_stats"]:
+            if pgdict["pgid"] == pg.split("s")[0]:
+                assert(pgdict["state"] == "active+clean")
+                if 's' in pg:
+                    shard = int(pg.split("s")[1])
+                    osds.append(pgdict["acting"][shard])
+                else:
+                    osds += pgdict["acting"]
     raw = list(set(osds))
     osds = []
     for osd in raw:
@@ -180,6 +178,7 @@ def main():
     DATADIR = "/tmp/data.{pid}".format(pid=pid)
     CFSD_PREFIX = "./ceph_filestore_dump --filestore-path dev/{osd} --journal-path dev/{osd}.journal "
     DATALINECOUNT = 10000
+    PROFNAME = "testecprofile"
 
     vstart(new=True)
     wait_for_health()
@@ -191,13 +190,13 @@ def main():
 
     print "Created Replicated pool #{repid}".format(repid=REPID)
 
-    cmd = "./ceph osd erasure-code-profile set testprofile ruleset-failure-domain=osd"
+    cmd = "./ceph osd erasure-code-profile set {prof} ruleset-failure-domain=osd".format(prof=PROFNAME)
     logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
-    cmd = "./ceph osd erasure-code-profile get testprofile"
+    cmd = "./ceph osd erasure-code-profile get {prof}".format(prof=PROFNAME)
     logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
-    cmd = "./ceph osd pool create {pool} 12 12 erasure testprofile".format(pool=EC_POOL)
+    cmd = "./ceph osd pool create {pool} 12 12 erasure {prof}".format(pool=EC_POOL, prof=PROFNAME)
     logging.debug(cmd)
     call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
     ECID = get_pool_id(EC_POOL, nullfd)
@@ -322,6 +321,9 @@ def main():
 
     """
     wait_for_health()
+
+    jsontext = check_output("./ceph osd dump -f json".split(), stderr=nullfd)
+    osddump = json.loads(jsontext)
 
     jsontext = check_output("./ceph pg dump_json".split(), stderr=nullfd)
     pgdump = json.loads(jsontext)
