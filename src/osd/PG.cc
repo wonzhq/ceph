@@ -323,7 +323,7 @@ void PG::recalc_readable_until(utime_t now)
     if (p == hb_stamps.end()) {
       // Note that if we are alone, then this is all moot since
       // anybody else will need to probe us to peer anyway.
-      min = ceph_clock_now(NULL);
+      min = now;
     } else {
       min = (*p)->last_acked_ping;
       for (++p; p != hb_stamps.end(); ++p) {
