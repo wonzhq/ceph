@@ -117,3 +117,5 @@ TODO
 #. inherit previous intervals' readable_until on pg activation
 
 #. stress test tool
+
+- heartbeat base case for new connections?

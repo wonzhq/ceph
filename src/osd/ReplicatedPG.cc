@@ -1109,6 +1109,29 @@ void ReplicatedPG::do_request(
   if (pgbackend->handle_message(op))
     return;
 
+  utime_t now = ceph_clock_now(NULL);
+  pair<utime_t,utime_t> rup = get_readable_from_until();
+  if (now < rup.first || now > rup.second) {
+    recalc_readable_until(now);
+    dout(10) << __func__ << " readable now from " << rup.first
+	     << " until " << rup.second << dendl;
+    rup = get_readable_from_until();
+  }
+  if (now <= rup.first) {
+    // not readable yet
+    dout(10) << __func__ << " not yet readable until " << rup.first
+	     << ", waiting" << dendl;
+    waiting_for_active.push_back(op);
+    return;
+  }
+  if (rup.second < now) {
+    // not readable any more
+    dout(10) << __func__ << " readable_until " << rup.second << " < now "
+	     << now << dendl;
+    waiting_for_active.push_back(op);
+    return;
+  }
+
   switch (op->get_req()->get_type()) {
   case CEPH_MSG_OSD_OP:
     if (is_replay()) {
@@ -1260,6 +1283,8 @@ void ReplicatedPG::do_op(OpRequestRef op)
     osd->reply_op_error(op, -EINVAL);
     return;
   }
+
+  
 
   // dup/replay?
   if (op->may_write() || op->may_cache()) {

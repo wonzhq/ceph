@@ -482,6 +482,10 @@ public:
   /// lower bound on how much longer we will remain readable
   map<epoch_t,utime_t> readable_until;  ///< interval start -> readable_until
 
+
+  /// prune prior intervals' past readable_until values
+  void prune_past_readable_until(utime_t now);
+
   /// recalculate readable_until
   void recalc_readable_until(utime_t now);
 
@@ -490,11 +494,21 @@ public:
     return readable_until;
   }
 
-  utime_t get_readable_delta() {
-    recalc_readable_until();
-    if (readable_until != utime_t())
-      return ceph_clock_now(NULL) - readable_until;
-    return utime_t();
+  /// return max readable_until from prior intervals
+  pair<utime_t,utime_t> get_readable_from_until() {
+    utime_t from, to;
+    map<epoch_t,utime_t>::reverse_iterator p = readable_until.rbegin();
+    assert(p->first == info.history.same_interval_since);
+    to = p->second;
+    for (++p; p != readable_until.rend(); ++p) {
+      if (p->second > from)
+	from = p->second;
+    }
+    return make_pair(from, to);
+  }
+  utime_t get_active_readable_until() {
+    assert(!readable_until.empty());
+    return readable_until.rbegin()->second;
   }
 
   // [primary only] content recovery state

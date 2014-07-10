@@ -309,13 +309,18 @@ void PG::init_primary_up_acting(
   }
 }
 
-void PG::recalc_readable_until(utime_t now)
+void PG::prune_past_readable_until(utime_t now)
 {
-  // prune values in the past
+  // prune pairs in past intervals and in the past
   while (!readable_until.empty() &&
+	 readable_until.begin()->first < info.history.same_interval_since &&
 	 readable_until.begin()->second <= now) {
     readable_until.erase(readable_until.begin());
   }
+}
+
+void PG::recalc_readable_until(utime_t now)
+{
   epoch_t start = info.history.same_interval_since;
   if (is_primary()) {
     utime_t min;
