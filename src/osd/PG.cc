@@ -319,9 +319,10 @@ void PG::prune_past_readable_until(utime_t now)
   }
 }
 
-void PG::recalc_readable_until(utime_t now)
+void PG::recalc_readable_until(utime_t now, bool queue_on_missing_hb)
 {
   epoch_t start = info.history.same_interval_since;
+  utime_t cutoff = now - pool.get_readable_interval();
   if (is_primary()) {
     utime_t min;
     vector<HeartbeatStampsRef>::iterator p = hb_stamps.begin();
@@ -330,21 +331,34 @@ void PG::recalc_readable_until(utime_t now)
       // anybody else will need to probe us to peer anyway.
       min = now;
     } else {
-      min = (*p)->last_acked_ping;
+      if (queue_on_missing_hb)
+	min = (*p)->sample_last_acked_ping_or_queue(cutoff, this);
+      else
+	min = (*p)->sample_last_acked_ping();
       for (++p; p != hb_stamps.end(); ++p) {
-	if ((*p)->last_acked_ping < min)
-	  min = (*p)->last_acked_ping;
+	utime_t lap;
+	if (queue_on_missing_hb)
+	  lap = (*p)->sample_last_acked_ping_or_queue(cutoff, this);
+	else
+	  lap = (*p)->sample_last_acked_ping();
+	if (lap < min)
+	  min = lap;
       }
     }
     readable_until[start] = min + pool.get_readable_interval();
   } else if (is_replica()) {
     assert(hb_stamps.size() == 1);
-    readable_until[start] =
-      hb_stamps[0]->last_reply + pool.get_readable_interval();
+    utime_t r;
+    if (queue_on_missing_hb)
+      r = hb_stamps[0]->sample_last_reply_or_queue(cutoff, this);
+    else
+      r = hb_stamps[0]->sample_last_reply();
+    readable_until[start] = r + pool.get_readable_interval();
   } else {
     readable_until[start] = utime_t();
   }
-  dout(20) << __func__ << " " << readable_until << dendl;
+  dout(20) << __func__ << " " << readable_until
+	   << (queue_on_missing_hb ? " queue_on_missing_hb" : "") << dendl;
 }
 
   
@@ -4659,7 +4673,7 @@ void PG::start_peering_interval(
   // make readable_until value for the current/prior interval accurate
   utime_t now = ceph_clock_now(NULL);
   prune_past_readable_until(now);
-  recalc_readable_until(now);
+  recalc_readable_until(now, false);
 
   pg_shard_t old_acting_primary = get_primary();
   pg_shard_t old_up_primary = up_primary;

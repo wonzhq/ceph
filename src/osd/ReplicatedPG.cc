@@ -1186,7 +1186,7 @@ bool ReplicatedPG::check_unreadable()
   prune_past_readable_until(now);
   pair<utime_t,utime_t> rup = get_readable_from_until();
   if (now <= rup.first || now > rup.second) {
-    recalc_readable_until(now);
+    recalc_readable_until(now, true);
     dout(10) << __func__ << " readable now from " << rup.first
 	     << " until " << rup.second << dendl;
     rup = get_readable_from_until();
@@ -1217,8 +1217,9 @@ struct C_RecheckReadable : public Context {
   void finish(int r) {
     if (r >= 0) {
       pg->lock();
-      if (!pg->pg_has_reset_since(epoch))
-	pg->recheck_unreadable();
+#warning foo
+      //if (!pg->pg_has_reset_since(epoch))
+      //pg->recheck_unreadable();
       pg->unlock();
     }
   }
@@ -9445,7 +9446,8 @@ void ReplicatedPG::on_activate()
     dout(10) << __func__ << " not readable until " << rup.first << dendl;
     state_set(PG_STATE_UNREADABLE);
     publish_stats_to_osd();
-    service.timer.add_event(new C_RecheckReadable(this, get_osdmap()->get_epoch()));
+#warning timer
+    //service.timer.add_event(new C_RecheckReadable(this, get_osdmap()->get_epoch()));
   }
 }
 

@@ -99,28 +99,64 @@ struct HeartbeatStamps {
   /// lower bound on consumed epochs for peer's PGs
   epoch_t consumed_epoch;
 
+  /// PGs we should kick if we get a new heartbeat
+  set<PGRef> waiting_pgs;
+
   HeartbeatStamps()
     : lock("OSDService::HeartbeatStamps::lock"),
       up_from(0),
       consumed_epoch(0) {}
 
-  void got_ping(utime_t now, epoch_t consumed) {
+  void got_ping(utime_t now, epoch_t consumed, set<PGRef> *wake_pgs) {
     Mutex::Locker l(lock);
     if (consumed < consumed_epoch)
       return;
     if (consumed > consumed_epoch)
       consumed_epoch = consumed;
     last_reply = now;
+    wake_pgs->swap(waiting_pgs);
   }
 
-  void got_ping_reply(utime_t stamp, epoch_t consumed) {
+  void got_ping_reply(utime_t stamp, epoch_t consumed, set<PGRef> *wake_pgs) {
     Mutex::Locker l(lock);
     if (consumed < consumed_epoch)
       return;
     if (consumed > consumed_epoch)
       consumed_epoch = consumed;
-    if (stamp > last_acked_ping)
+    if (stamp > last_acked_ping) {
       last_acked_ping = stamp;
+      wake_pgs->swap(waiting_pgs);
+    }
+  }
+
+  void queue_waiting_pg(PG *p) {
+    Mutex::Locker l(lock);
+    waiting_pgs.insert(p);
+  }
+
+  utime_t sample_last_acked_ping() {
+    Mutex::Locker l(lock);
+    return last_acked_ping;
+  }
+  utime_t sample_last_reply() {
+    Mutex::Locker l(lock);
+    return last_reply;
+  }
+
+  /// safely sample last_acked_ping; queue pg if it's old
+  utime_t sample_last_acked_ping_or_queue(utime_t cutoff, PG *p) {
+    Mutex::Locker l(lock);
+    if (cutoff <= last_acked_ping)
+      waiting_pgs.insert(p);
+    return last_acked_ping;
+  }
+
+  /// safely sample last_reply; queue pg if it's old
+  utime_t sample_last_reply_or_queue(utime_t cutoff, PG *p) {
+    Mutex::Locker l(lock);
+    if (cutoff <= last_reply)
+      waiting_pgs.insert(p);
+    return last_reply;
   }
 };
 typedef ceph::shared_ptr<HeartbeatStamps> HeartbeatStampsRef;
@@ -530,11 +566,11 @@ public:
   void prune_past_readable_until(utime_t now);
 
   /// recalculate readable_until
-  void recalc_readable_until(utime_t now);
+  void recalc_readable_until(utime_t now, bool queue_on_missing_hb);
 
   const map<epoch_t,utime_t>& get_readable_until(utime_t now) {
     prune_past_readable_until(now);
-    recalc_readable_until(now);
+    recalc_readable_until(now, false);
     return readable_until;
   }
 
