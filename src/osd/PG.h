@@ -83,6 +83,49 @@ void intrusive_ptr_release(PG *pg);
   typedef boost::intrusive_ptr<PG> PGRef;
 #endif
 
+struct HeartbeatStamps {
+  Mutex lock;
+
+  /// last ack we send to this peer
+  utime_t last_reply;
+
+  /// the ping tx time for the most recent ping reply we recieved
+  /// from this peer.
+  utime_t last_acked_ping;
+
+  /// highest up_from we've seen from this rank
+  epoch_t up_from;
+
+  /// lower bound on consumed epochs for peer's PGs
+  epoch_t consumed_epoch;
+
+  HeartbeatStamps()
+    : lock("OSDService::HeartbeatStamps::lock"),
+      up_from(0),
+      consumed_epoch(0) {}
+
+  void got_ping(utime_t now, epoch_t consumed) {
+    Mutex::Locker l(lock);
+    if (consumed < consumed_epoch)
+      return;
+    if (consumed > consumed_epoch)
+      consumed_epoch = consumed;
+    last_reply = now;
+  }
+
+  void got_ping_reply(utime_t stamp, epoch_t consumed) {
+    Mutex::Locker l(lock);
+    if (consumed < consumed_epoch)
+      return;
+    if (consumed > consumed_epoch)
+      consumed_epoch = consumed;
+    if (stamp > last_acked_ping)
+      last_acked_ping = stamp;
+  }
+};
+typedef ceph::shared_ptr<HeartbeatStamps> HeartbeatStampsRef;
+
+
 struct PGRecoveryStats {
   struct per_state_info {
     uint64_t enter, exit;     // enter/exit counts
@@ -490,6 +533,7 @@ public:
   void recalc_readable_until(utime_t now);
 
   const map<epoch_t,utime_t>& get_readable_until(utime_t now) {
+    prune_past_readable_until(now);
     recalc_readable_until(now);
     return readable_until;
   }
@@ -2051,16 +2095,17 @@ public:
   bool should_send_notify() const { return send_notify; }
 
   int get_state() const { return state; }
-  bool       is_active() const { return state_test(PG_STATE_ACTIVE); }
-  bool       is_peering() const { return state_test(PG_STATE_PEERING); }
-  bool       is_down() const { return state_test(PG_STATE_DOWN); }
-  bool       is_replay() const { return state_test(PG_STATE_REPLAY); }
-  bool       is_clean() const { return state_test(PG_STATE_CLEAN); }
-  bool       is_degraded() const { return state_test(PG_STATE_DEGRADED); }
+  bool is_active() const { return state_test(PG_STATE_ACTIVE); }
+  bool is_peering() const { return state_test(PG_STATE_PEERING); }
+  bool is_down() const { return state_test(PG_STATE_DOWN); }
+  bool is_replay() const { return state_test(PG_STATE_REPLAY); }
+  bool is_clean() const { return state_test(PG_STATE_CLEAN); }
+  bool is_degraded() const { return state_test(PG_STATE_DEGRADED); }
+  bool is_unreadable() const { return state_test(PG_STATE_UNREADABLE); }
+  bool is_scrubbing() const { return state_test(PG_STATE_SCRUBBING); }
 
-  bool       is_scrubbing() const { return state_test(PG_STATE_SCRUBBING); }
+  bool is_empty() const { return info.last_update == eversion_t(0,0); }
 
-  bool  is_empty() const { return info.last_update == eversion_t(0,0); }
 
   void init(
     int role,

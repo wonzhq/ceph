@@ -762,6 +762,7 @@ inline ostream& operator<<(ostream& out, const osd_stat_t& s) {
 #define PG_STATE_BACKFILL  (1<<20) // [active] backfilling pg content
 #define PG_STATE_BACKFILL_TOOFULL (1<<21) // backfill can't proceed: too full
 #define PG_STATE_RECOVERY_WAIT (1<<22) // waiting for recovery reservations
+#define PG_STATE_UNREADABLE (1<<23) // waiting for prior intervals' readable_until to expire, or suspended because current interval peers haven't heartbeated
 
 std::string pg_state_string(int state);
 
@@ -3411,48 +3412,6 @@ enum scrub_error_type {
   DEEP_ERROR,
   SHALLOW_ERROR
 };
-
-struct HeartbeatStamps {
-  Mutex lock;
-
-  /// last ack we send to this peer
-  utime_t last_reply;
-
-  /// the ping tx time for the most recent ping reply we recieved
-  /// from this peer.
-  utime_t last_acked_ping;
-
-  /// highest up_from we've seen from this rank
-  epoch_t up_from;
-
-  /// lower bound on consumed epochs for peer's PGs
-  epoch_t consumed_epoch;
-
-  HeartbeatStamps()
-    : lock("OSDService::HeartbeatStamps::lock"),
-      up_from(0),
-      consumed_epoch(0) {}
-
-  void got_ping(utime_t now, epoch_t consumed) {
-    Mutex::Locker l(lock);
-    if (consumed < consumed_epoch)
-      return;
-    if (consumed > consumed_epoch)
-      consumed_epoch = consumed;
-    last_reply = now;
-  }
-
-  void got_ping_reply(utime_t stamp, epoch_t consumed) {
-    Mutex::Locker l(lock);
-    if (consumed < consumed_epoch)
-      return;
-    if (consumed > consumed_epoch)
-      consumed_epoch = consumed;
-    if (stamp > last_acked_ping)
-      last_acked_ping = stamp;
-  }
-};
-typedef ceph::shared_ptr<HeartbeatStamps> HeartbeatStampsRef;
 
 
 #endif

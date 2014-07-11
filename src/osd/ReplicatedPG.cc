@@ -1109,29 +1109,6 @@ void ReplicatedPG::do_request(
   if (pgbackend->handle_message(op))
     return;
 
-  utime_t now = ceph_clock_now(NULL);
-  pair<utime_t,utime_t> rup = get_readable_from_until();
-  if (now < rup.first || now > rup.second) {
-    recalc_readable_until(now);
-    dout(10) << __func__ << " readable now from " << rup.first
-	     << " until " << rup.second << dendl;
-    rup = get_readable_from_until();
-  }
-  if (now <= rup.first) {
-    // not readable yet
-    dout(10) << __func__ << " not yet readable until " << rup.first
-	     << ", waiting" << dendl;
-    waiting_for_active.push_back(op);
-    return;
-  }
-  if (rup.second < now) {
-    // not readable any more
-    dout(10) << __func__ << " readable_until " << rup.second << " < now "
-	     << now << dendl;
-    waiting_for_active.push_back(op);
-    return;
-  }
-
   switch (op->get_req()->get_type()) {
   case CEPH_MSG_OSD_OP:
     if (is_replay()) {
@@ -1203,12 +1180,73 @@ bool ReplicatedPG::check_src_targ(const hobject_t& soid, const hobject_t& toid) 
   return false;
 }
 
+bool ReplicatedPG::check_unreadable()
+{
+  utime_t now = ceph_clock_now(NULL);
+  prune_past_readable_until(now);
+  pair<utime_t,utime_t> rup = get_readable_from_until();
+  if (now <= rup.first || now > rup.second) {
+    recalc_readable_until(now);
+    dout(10) << __func__ << " readable now from " << rup.first
+	     << " until " << rup.second << dendl;
+    rup = get_readable_from_until();
+  }
+  if (now > rup.first && now <= rup.second) {
+    return false;
+  }
+  if (!is_unreadable()) {
+    dout(10) << __func__ << " now unreadable; readable from " << rup.first
+	     << " until " << rup.second << dendl;
+    state_set(PG_STATE_UNREADABLE);
+    publish_stats_to_osd();
+  }
+  if (now <= rup.first) {
+    dout(10) << __func__ << " unreadable until " << rup.first << dendl;
+  }
+  if (rup.second < now) {
+    dout(10) << __func__ << " unreadable; readable_until " << rup.second
+	     << " < now " << now << dendl;
+  }
+  return true;
+}
+
+struct C_RecheckReadable : public Context {
+  PGRef pg;
+  epoch_t epoch;
+  C_RecheckReadable(PG *p, epoch_t e) : pg(p), epoch(e) {}
+  void finish(int r) {
+    if (r >= 0) {
+      pg->lock();
+      if (!pg->pg_has_reset_since(epoch))
+	pg->recheck_unreadable();
+      pg->unlock();
+    }
+  }
+};
+
+void ReplicatedPG::recheck_unreadable()
+{
+  if (!is_unreadable())
+    return;
+  if (check_unreadable()) {
+    dout(10) << __func__ << " now readable, requeueing" << dendl;
+    state_clear(PG_STATE_UNREADABLE);
+    publish_stats_to_osd();
+    requeue_ops(waiting_for_active);
+  }
+}
+
 /** do_op - do an op
  * pg lock will be held (if multithreaded)
  * osd_lock NOT held.
  */
 void ReplicatedPG::do_op(OpRequestRef op)
 {
+  if (check_unreadable()) {
+    waiting_for_active.push_back(op);
+    return;
+  }
+
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
   assert(m->get_header().type == CEPH_MSG_OSD_OP);
   if (op->includes_pg_op()) {
@@ -9400,6 +9438,15 @@ void ReplicatedPG::on_activate()
 
   hit_set_setup();
   agent_setup();
+
+  utime_t now = ceph_clock_now(NULL);
+  pair<utime_t,utime_t> rup = get_readable_from_until();
+  if (now <= rup.first) {
+    dout(10) << __func__ << " not readable until " << rup.first << dendl;
+    state_set(PG_STATE_UNREADABLE);
+    publish_stats_to_osd();
+    service.timer.add_event(new C_RecheckReadable(this, get_osdmap()->get_epoch()));
+  }
 }
 
 void ReplicatedPG::on_change(ObjectStore::Transaction *t)
