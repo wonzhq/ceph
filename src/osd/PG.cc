@@ -1888,6 +1888,62 @@ void PG::replay_queued_ops()
   publish_stats_to_osd();
 }
 
+struct C_RecheckReadable : public Context {
+  PGRef pg;
+  epoch_t epoch;
+  C_RecheckReadable(PG *p, epoch_t e) : pg(p), epoch(e) {}
+  void finish(int r) {
+    if (r >= 0) {
+      pg->lock();
+      if (!pg->pg_has_reset_since(epoch))
+	pg->recheck_unreadable();
+      pg->unlock();
+    }
+  }
+};
+
+void PG::recheck_unreadable()
+{
+  if (!is_unreadable())
+    return;
+  if (check_unreadable()) {
+    dout(10) << __func__ << " now readable, requeueing" << dendl;
+    state_clear(PG_STATE_UNREADABLE);
+    publish_stats_to_osd();
+    requeue_ops(waiting_for_active);
+  }
+}
+
+bool PG::check_unreadable()
+{
+  utime_t now = ceph_clock_now(NULL);
+  prune_past_readable_until(now);
+  pair<utime_t,utime_t> rup = get_readable_from_until();
+  if (now <= rup.first || now > rup.second) {
+    recalc_readable_until(now, true);
+    dout(10) << __func__ << " readable now from " << rup.first
+	     << " until " << rup.second << dendl;
+    rup = get_readable_from_until();
+  }
+  if (now > rup.first && now <= rup.second) {
+    return false;
+  }
+  if (!is_unreadable()) {
+    dout(10) << __func__ << " now unreadable; readable from " << rup.first
+	     << " until " << rup.second << dendl;
+    state_set(PG_STATE_UNREADABLE);
+    publish_stats_to_osd();
+  }
+  if (now <= rup.first) {
+    dout(10) << __func__ << " unreadable until " << rup.first << dendl;
+  }
+  if (rup.second < now) {
+    dout(10) << __func__ << " unreadable; readable_until " << rup.second
+	     << " < now " << now << dendl;
+  }
+  return true;
+}
+
 void PG::_activate_committed(epoch_t e)
 {
   lock();

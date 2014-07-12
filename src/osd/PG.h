@@ -591,6 +591,9 @@ public:
     return readable_until.rbegin()->second;
   }
 
+  bool check_unreadable();
+  void recheck_unreadable();
+
   // [primary only] content recovery state
  protected:
   struct PriorSet {
