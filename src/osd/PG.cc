@@ -268,27 +268,30 @@ void PG::init_primary_up_acting(
 	  pool.info.ec_pool() ? shard_id_t(i) : shard_id_t::NO_SHARD));
   }
   up = newup;
+
   if (!pool.info.ec_pool()) {
+    // replicated
     up_primary = pg_shard_t(new_up_primary, shard_id_t::NO_SHARD);
     primary = pg_shard_t(new_acting_primary, shard_id_t::NO_SHARD);
-    return;
-  }
-  up_primary = pg_shard_t();
-  primary = pg_shard_t();
-  for (uint8_t i = 0; i < up.size(); ++i) {
-    if (up[i] == new_up_primary) {
-      up_primary = pg_shard_t(up[i], shard_id_t(i));
-      break;
+  } else {
+    // erasure
+    up_primary = pg_shard_t();
+    primary = pg_shard_t();
+    for (uint8_t i = 0; i < up.size(); ++i) {
+      if (up[i] == new_up_primary) {
+	up_primary = pg_shard_t(up[i], shard_id_t(i));
+	break;
+      }
     }
-  }
-  for (uint8_t i = 0; i < acting.size(); ++i) {
-    if (acting[i] == new_acting_primary) {
-      primary = pg_shard_t(acting[i], shard_id_t(i));
-      break;
+    for (uint8_t i = 0; i < acting.size(); ++i) {
+      if (acting[i] == new_acting_primary) {
+	primary = pg_shard_t(acting[i], shard_id_t(i));
+	break;
+      }
     }
+    assert(up_primary.osd == new_up_primary);
+    assert(primary.osd == new_acting_primary);
   }
-  assert(up_primary.osd == new_up_primary);
-  assert(primary.osd == new_acting_primary);
 
   if (is_primary()) {
     // we care about all other osds in the acting set
@@ -1891,20 +1894,26 @@ void PG::replay_queued_ops()
 struct C_RecheckReadable : public Context {
   PGRef pg;
   epoch_t epoch;
-  C_RecheckReadable(PG *p, epoch_t e) : pg(p), epoch(e) {}
+  C_RecheckReadable(PG *p, epoch_t e=0) : pg(p), epoch(e) {}
   void finish(int r) {
     if (r >= 0) {
       pg->lock();
-      if (!pg->pg_has_reset_since(epoch))
-	pg->recheck_unreadable();
+      pg->recheck_unreadable(epoch);
       pg->unlock();
     }
   }
 };
 
-void PG::recheck_unreadable()
+void PG::queue_recheck_unreadable()
 {
-  if (!is_unreadable())
+  osd->objecter_finisher.queue(new C_RecheckReadable(this));
+}
+
+void PG::recheck_unreadable(epoch_t e)
+{
+  if (e > 0 && pg_has_reset_since(e))
+    return;
+  if (!is_active() || !is_unreadable())
     return;
   if (check_unreadable()) {
     dout(10) << __func__ << " now readable, requeueing" << dendl;
