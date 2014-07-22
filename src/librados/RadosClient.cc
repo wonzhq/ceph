@@ -334,6 +334,7 @@ int librados::RadosClient::create_ioctx(const char *name, IoCtxImpl **io)
       poolid = lookup_pool(name);
       if (poolid < 0) {
 	return (int)poolid;
+      }
     }
   }
 
