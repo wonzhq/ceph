@@ -9390,8 +9390,10 @@ void ReplicatedPG::on_activate()
     dout(10) << __func__ << " not readable until " << rup.first << dendl;
     state_set(PG_STATE_UNREADABLE);
     publish_stats_to_osd();
-#warning timer
-    //service.timer.add_event(new C_RecheckReadable(this, get_osdmap()->get_epoch()));
+    Mutex::locker l(osd->timer_lock);
+    osd->timer.add_event_at(
+      rup.first,
+      new C_RecheckReadable(this, get_osdmap()->get_epoch()));
   }
 }
 
