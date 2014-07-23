@@ -41,7 +41,6 @@ enum {
 #include "include/Context.h"
 
 #include "common/Thread.h"
-#include "common/Cond.h"
 
 #include "LogSegment.h"
 
@@ -79,8 +78,6 @@ protected:
 
 
   // -- replay --
-  Cond replay_cond;
-
   class ReplayThread : public Thread {
     MDLog *log;
   public:
