@@ -1432,7 +1432,7 @@ void MDS::starting_done()
   mdcache->open_root();
 
   // start new segment
-  mdlog->start_new_segment(0);
+  mdlog->start_new_segment();
 }
 
 

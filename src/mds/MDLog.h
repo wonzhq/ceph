@@ -64,18 +64,21 @@ using std::map;
 class MDLog {
 public:
   MDS *mds;
+
 protected:
+
+  Mutex lock;
   int num_events; // in events
-
   int unflushed;
-
   bool capped;
-
   inodeno_t ino;
   Journaler *journaler;
-
   PerfCounters *logger;
 
+
+  LogSegment *peek_current_segment() {
+    return segments.empty() ? NULL : segments.rbegin()->second;
+  }
 
   // -- replay --
   class ReplayThread : public Thread {
@@ -113,6 +116,8 @@ protected:
   void _reformat_journal(JournalPointer const &jp, Journaler *old_journal, Context *completion);
 
   // -- segments --
+  // XXX so segments are a problem for making MDLog's lock self contained, because
+  // callers use get_current_segment while prepare log events before submitting them.
   map<uint64_t,LogSegment*> segments;
   set<LogSegment*> expiring_segments;
   set<LogSegment*> expired_segments;
@@ -123,23 +128,8 @@ protected:
   friend class ESubtreeMap;
   friend class C_MDS_WroteImportMap;
   friend class MDCache;
+  friend class C_MaybeExpiredSegment;
 
-public:
-  uint64_t get_last_segment_offset() {
-    assert(!segments.empty());
-    return segments.rbegin()->first;
-  }
-  LogSegment *get_oldest_segment() {
-    return segments.begin()->second;
-  }
-  void remove_oldest_segment() {
-    map<uint64_t, LogSegment*>::iterator p = segments.begin();
-    delete p->second;
-    segments.erase(p);
-  }
-
-
-private:
   struct C_MDL_WriteError : public Context {
     MDLog *mdlog;
     C_MDL_WriteError(MDLog *m) : mdlog(m) {}
@@ -148,17 +138,18 @@ private:
     }
   };
   void handle_journaler_write_error(int r);
- 
-public:
-  void create_logger();
-  
-  // replay state
-  map<inodeno_t, set<inodeno_t> >   pending_exports;
 
+  LogEvent *cur_event;
 
+  void try_expire(LogSegment *ls, int op_prio);
+  void _maybe_expired(LogSegment *ls, int op_prio);
+  void _expired(LogSegment *ls);
+  void _trim_expired_segments();
 
+  void write_head(Context *onfinish);
 public:
   MDLog(MDS *m) : mds(m),
+		  lock("MDLog"),
 		  num_events(0), 
 		  unflushed(0),
 		  capped(false),
@@ -171,94 +162,74 @@ public:
 		  cur_event(NULL) { }		  
   ~MDLog();
 
+  void create_logger();
+  // Capping is done during shutdown: the capped flag indicates that
+  // it is safe to expire the last log segment.
+  bool is_capped() const { return capped; }
+  void cap();
+
+  void start_entry(LogEvent *e);
+  void cancel_entry(LogEvent *e);
+  bool entry_is_open() const { return cur_event != NULL; }
+
+  // Asynchronous I/O operations
+  // ===========================
+  void submit_entry(LogEvent *e, Context *c = 0);
+  void start_submit_entry(LogEvent *e, Context *c = 0) {
+    start_entry(e);
+    submit_entry(e, c);
+  }
+  void create(Context *onfinish);  // fresh, empty log! 
+  void open(Context *onopen);      // append() or replay() to follow!
+  void replay(Context *onfinish);
+  void wait_for_safe( Context *c );
 
   // -- segments --
-  void start_new_segment(Context *onsync=0);
+  void start_new_segment();
   void prepare_new_segment();
   void journal_segment_subtree_map();
-
-  LogSegment *peek_current_segment() {
-    return segments.empty() ? NULL : segments.rbegin()->second;
-  }
 
   LogSegment *get_current_segment() { 
     assert(!segments.empty());
     return segments.rbegin()->second;
   }
 
-  LogSegment *get_segment(uint64_t off) {
-    if (segments.count(off))
-      return segments[off];
-    return NULL;
-  }
+  LogSegment *get_segment(uint64_t off);
 
-  bool have_any_segments() {
-    return !segments.empty();
-  }
+  size_t get_num_events() const { return num_events; }
+  size_t get_num_segments() const { return segments.size(); }  
 
-  void flush_logger();
-
-  size_t get_num_events() { return num_events; }
-  size_t get_num_segments() { return segments.size(); }  
-
-  uint64_t get_read_pos();
-  uint64_t get_write_pos();
-  uint64_t get_safe_pos();
+  uint64_t get_read_pos() const;
+  uint64_t get_write_pos() const;
+  uint64_t get_safe_pos() const;
   Journaler *get_journaler() { return journaler; }
-  bool empty() { return segments.empty(); }
+  bool empty() const { return segments.empty(); }
 
-  bool is_capped() { return capped; }
-  void cap();
 
-  // -- events --
-private:
-  LogEvent *cur_event;
-public:
-  void start_entry(LogEvent *e);
-  void cancel_entry(LogEvent *e);
-  void submit_entry(LogEvent *e, Context *c = 0);
-  void start_submit_entry(LogEvent *e, Context *c = 0) {
-    start_entry(e);
-    submit_entry(e, c);
-  }
-  bool entry_is_open() { return cur_event != NULL; }
-
-  void wait_for_safe( Context *c );
   void flush();
+  /*
   bool is_flushed() {
     return unflushed == 0;
   }
-
-private:
-  class C_MaybeExpiredSegment : public Context {
-    MDLog *mdlog;
-    LogSegment *ls;
-    int op_prio;
-  public:
-    C_MaybeExpiredSegment(MDLog *mdl, LogSegment *s, int p) : mdlog(mdl), ls(s), op_prio(p) {}
-    void finish(int res) {
-      mdlog->_maybe_expired(ls, op_prio);
-    }
-  };
-
-  void try_expire(LogSegment *ls, int op_prio);
-  void _maybe_expired(LogSegment *ls, int op_prio);
-  void _expired(LogSegment *ls);
-  void _trim_expired_segments();
-
-public:
+  */
   void trim(int max=-1);
-
-private:
-  void write_head(Context *onfinish);
-
-public:
-  void create(Context *onfinish);  // fresh, empty log! 
-  void open(Context *onopen);      // append() or replay() to follow!
   void append();
-  void replay(Context *onfinish);
 
   void standby_trim_segments();
+
+  
+  uint64_t get_last_segment_offset() {
+    assert(!segments.empty());
+    return segments.rbegin()->first;
+  }
+  LogSegment *get_oldest_segment() {
+    return segments.begin()->second;
+  }
+  void remove_oldest_segment() {
+    map<uint64_t, LogSegment*>::iterator p = segments.begin();
+    delete p->second;
+    segments.erase(p);
+  }
 };
 
 #endif
