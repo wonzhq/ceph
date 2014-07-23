@@ -47,6 +47,21 @@ MDLog::~MDLog()
   }
 }
 
+struct C_MDL_WriteError : public Context {
+  MDS *mds;
+  C_MDL_WriteError(MDS *m) : mds(m) {}
+  void finish(int r) {
+    if (r == -EBLACKLISTED) {
+      derr << "we have been blacklisted (fenced), respawning..." << dendl;
+      mds->respawn();
+    } else {
+      derr << "unhandled error " << cpp_strerror(r) << ", shutting down..." << dendl;
+      mds->mds_lock.Lock();
+      mds->suicide();
+      mds->mds_lock.Unlock();
+    }
+  }
+};
 
 class C_MaybeExpiredSegment : public Context {
   MDLog *mdlog;
@@ -88,18 +103,6 @@ void MDLog::create_logger()
   g_ceph_context->get_perfcounters_collection()->add(logger);
 }
 
-void MDLog::handle_journaler_write_error(int r)
-{
-  if (r == -EBLACKLISTED) {
-    derr << "we have been blacklisted (fenced), respawning..." << dendl;
-    mds->respawn();
-  } else {
-    derr << "unhandled error " << cpp_strerror(r) << ", shutting down..." << dendl;
-    mds->mds_lock.Lock();
-    mds->suicide();
-    mds->mds_lock.Unlock();
-  }
-}
 
 void MDLog::write_head(Context *c) 
 {
@@ -139,7 +142,7 @@ void MDLog::create(Context *c)
 			    logger, l_mdl_jlat,
 			    &mds->timer, &mds->finisher);
   assert(journaler->is_readonly());
-  journaler->set_write_error_handler(new C_MDL_WriteError(this));
+  journaler->set_write_error_handler(new C_MDL_WriteError(mds));
   journaler->set_writeable();
   journaler->create(&mds->mdcache->default_log_layout, g_conf->mds_journal_format);
   journaler->write_head(gather.new_sub());
@@ -606,7 +609,7 @@ void MDLog::_recovery_thread(Context *completion)
     /* Great, the journal is of current format and ready to rock, hook
      * it into this->journaler and complete */
     journaler = front_journal;
-    journaler->set_write_error_handler(new C_MDL_WriteError(this));
+    journaler->set_write_error_handler(new C_MDL_WriteError(mds));
     mds->mds_lock.Lock();
     completion->complete(0);
     mds->mds_lock.Unlock();
@@ -746,7 +749,7 @@ void MDLog::_reformat_journal(JournalPointer const &jp_in, Journaler *old_journa
   dout(1) << "Journal rewrite complete, continuing with normal startup" << dendl;
   journaler = new_journal;
   journaler->set_readonly();
-  journaler->set_write_error_handler(new C_MDL_WriteError(this));
+  journaler->set_write_error_handler(new C_MDL_WriteError(mds));
 
   /* Trigger completion */
   mds->mds_lock.Lock();

@@ -188,7 +188,6 @@ void Journaler::reread_head(Context *onfinish)
 
 void Journaler::_finish_reread_head(int r, bufferlist& bl, Context *finish)
 {
-  Mutex::Locker l(lock);
 
   //read on-disk header into
   assert(bl.length() || r < 0 );
@@ -197,11 +196,14 @@ void Journaler::_finish_reread_head(int r, bufferlist& bl, Context *finish)
   Header h;
   bufferlist::iterator p = bl.begin();
   ::decode(h, p);
-  prezeroing_pos = prezero_pos = write_pos = flush_pos = safe_pos = h.write_pos;
-  expire_pos = h.expire_pos;
-  trimmed_pos = trimming_pos = h.trimmed_pos;
-  init_headers(h);
-  state = STATE_ACTIVE;
+  {
+    Mutex::Locker l(lock);
+    prezeroing_pos = prezero_pos = write_pos = flush_pos = safe_pos = h.write_pos;
+    expire_pos = h.expire_pos;
+    trimmed_pos = trimming_pos = h.trimmed_pos;
+    init_headers(h);
+    state = STATE_ACTIVE;
+  }
   finish->complete(r);
 }
 
@@ -282,14 +284,15 @@ void Journaler::reprobe(Context *finish)
 
 void Journaler::_finish_reprobe(int r, uint64_t new_end, Context *onfinish)
 {
-  Mutex::Locker l(lock);
-
-  assert(new_end >= write_pos || r < 0);
-  ldout(cct, 1) << "_finish_reprobe new_end = " << new_end 
-	  << " (header had " << write_pos << ")."
-	  << dendl;
-  prezeroing_pos = prezero_pos = write_pos = flush_pos = safe_pos = new_end;
-  state = STATE_ACTIVE;
+  {
+    Mutex::Locker l(lock);
+    assert(new_end >= write_pos || r < 0);
+    ldout(cct, 1) << "_finish_reprobe new_end = " << new_end 
+                  << " (header had " << write_pos << ")."
+                  << dendl;
+    prezeroing_pos = prezero_pos = write_pos = flush_pos = safe_pos = new_end;
+    state = STATE_ACTIVE;
+  }
   onfinish->complete(r);
 }
 
