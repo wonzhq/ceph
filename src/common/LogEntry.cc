@@ -140,7 +140,6 @@ void LogEntry::log_to_syslog(string level, string facility)
         stringify(who).c_str(),
         seq,
         msg.c_str());
-        //stringify(*this).c_str());
   }
 }
 
