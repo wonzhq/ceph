@@ -44,16 +44,16 @@ LogClient::LogClient(CephContext *cct, Messenger *m, MonMap *mm,
   : cct(cct), messenger(m), monmap(mm), is_mon(flags & FLAG_MON),
     log_lock("LogClient::log_lock"), last_log_sent(0), last_log(0)
 {
-  log_to_syslog = &cct->_conf->clog_to_syslog;
-  log_facility = &cct->_conf->clog_to_syslog_facility;
-  log_level = &cct->_conf->clog_to_syslog_level;
+  log_to_syslog = cct->_conf->clog_to_syslog;
+  log_facility = cct->_conf->clog_to_syslog_facility;
+  log_level = cct->_conf->clog_to_syslog_level;
 }
 
 LogClient::LogClient(CephContext *cct, Messenger *m, MonMap *mm,
 		     enum logclient_flag_t flags,
-                     const bool *log_to_syslog,
-                     const string *syslog_fac,
-                     const string *syslog_lvl)
+                     const bool log_to_syslog,
+                     const string& syslog_fac,
+                     const string& syslog_lvl)
   : cct(cct), messenger(m), monmap(mm), is_mon(flags & FLAG_MON),
     log_lock("LogClient::log_lock"), last_log_sent(0), last_log(0),
     log_facility(syslog_fac), log_level(syslog_lvl),

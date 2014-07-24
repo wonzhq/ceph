@@ -143,9 +143,9 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   monmap(map),
   clog(cct_, messenger, monmap, LogClient::FLAG_MON),
   admin_clog(cct_, messenger, monmap, LogClient::FLAG_MON,
-           &cct_->_conf->admin_clog_to_syslog,
-           &cct_->_conf->admin_clog_facility,
-           &cct_->_conf->admin_clog_level),
+           cct_->_conf->admin_clog_to_syslog,
+           cct_->_conf->admin_clog_facility,
+           cct_->_conf->admin_clog_level),
   key_server(cct, &keyring),
   auth_cluster_required(cct,
 			cct->_conf->auth_supported.length() ?
@@ -420,6 +420,13 @@ const char** Monitor::get_tracked_conf_keys() const
     "mon_lease",
     "mon_lease_renew_interval",
     "mon_lease_ack_timeout",
+    // clog & admin clog
+    "clog_to_syslog",
+    "clog_to_syslog_facility",
+    "clog_to_syslog_level",
+    "admin_clog_to_syslog",
+    "admin_clog_facility",
+    "admin_clog_level",
     NULL
   };
   return KEYS;
@@ -429,6 +436,24 @@ void Monitor::handle_conf_change(const struct md_config_t *conf,
                                  const std::set<std::string> &changed)
 {
   sanitize_options();
+
+  dout(10) << __func__ << " " << changed << dendl;
+
+  for (std::set<std::string>::iterator it = changed.begin();
+       it != changed.end(); ++it) {
+    if (*it == "clog_to_syslog")
+      clog.set_log_to_syslog(conf->clog_to_syslog);
+    else if (*it == "clog_to_syslog_facility")
+      clog.set_log_facility(conf->clog_to_syslog_facility);
+    else if (*it == "clog_to_syslog_level")
+      clog.set_log_level(conf->clog_to_syslog_level);
+    else if (*it == "admin_clog_to_syslog")
+      admin_clog.set_log_to_syslog(conf->admin_clog_to_syslog);
+    else if (*it == "admin_clog_facility")
+      admin_clog.set_log_facility(conf->admin_clog_facility);
+    else if (*it == "admin_clog_level")
+      admin_clog.set_log_level(conf->admin_clog_level);
+  }
 }
 
 int Monitor::sanitize_options()
