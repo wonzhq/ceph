@@ -4095,11 +4095,16 @@ bool OSDMonitor::prepare_command_impl(MMonCommand *m,
       map<string,string> loc;
       CrushWrapper::parse_loc_map(argvec, &loc);
 
-      dout(0) << "create-or-move crush item name '" << name << "' initial_weight " << weight
-	      << " at location " << loc << dendl;
-
       CrushWrapper newcrush;
       _get_pending_crush(newcrush);
+
+      if (newcrush.name_exists(name)) {
+	ss << "item " << name << " already exist, no need to change";
+	break;
+      }
+
+      dout(0) << "create-or-move crush item name '" << name << "' initial_weight " << weight
+	      << " at location " << loc << dendl;
 
       err = newcrush.create_or_move_item(g_ceph_context, id, weight, name, loc);
       if (err == 0) {
