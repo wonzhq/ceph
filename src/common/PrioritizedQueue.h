@@ -349,8 +349,8 @@ public:
     // if there are multiple buckets/subqueues with sufficient tokens,
     // we behave like a strict priority queue among all subqueues that
     // are eligible to run.
-    for (typename SubQueues::iterator i = queue.begin();
-	 i != queue.end();
+    for (typename SubQueues::reverse_iterator i = queue.rbegin();
+	 i != queue.rend();
 	 ++i) {
       assert(!(i->second.empty()));
       if (i->second.front().first < i->second.num_tokens()) {
