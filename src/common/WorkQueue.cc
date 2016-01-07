@@ -117,24 +117,26 @@ void ThreadPool::worker(WorkThread *wt)
 	last_work_queue %= work_queues.size();
 	wq = work_queues[last_work_queue];
 	
-	void *item = wq->_void_dequeue();
-	if (item) {
-	  processing++;
-	  ldout(cct,12) << "worker wq " << wq->name << " start processing " << item
-			<< " (" << processing << " active)" << dendl;
-	  TPHandle tp_handle(cct, hb, wq->timeout_interval, wq->suicide_interval);
-	  tp_handle.reset_tp_timeout();
-	  _lock.Unlock();
-	  wq->_void_process(item, tp_handle);
-	  _lock.Lock();
-	  wq->_void_process_finish(item);
-	  processing--;
-	  ldout(cct,15) << "worker wq " << wq->name << " done processing " << item
-			<< " (" << processing << " active)" << dendl;
-	  if (_pause || _draining)
-	    _wait_cond.Signal();
-	  did = true;
-	  break;
+	if (wq->__can_schedule()) {
+	  void *item = wq->_void_dequeue();
+	  if (item) {
+	    processing++;
+	    ldout(cct,12) << "worker wq " << wq->name << " start processing " << item
+	  		<< " (" << processing << " active)" << dendl;
+	    TPHandle tp_handle(cct, hb, wq->timeout_interval, wq->suicide_interval);
+	    tp_handle.reset_tp_timeout();
+	    _lock.Unlock();
+	    wq->_void_process(item, tp_handle);
+	    _lock.Lock();
+	    wq->_void_process_finish(item);
+	    processing--;
+	    ldout(cct,15) << "worker wq " << wq->name << " done processing " << item
+	  		<< " (" << processing << " active)" << dendl;
+	    if (_pause || _draining)
+	      _wait_cond.Signal();
+	    did = true;
+	    break;
+	  }
 	}
       }
       if (did)
@@ -437,4 +439,3 @@ void ShardedThreadPool::drain()
   shardedpool_lock.Unlock();
   ldout(cct,10) << "drained" << dendl;
 }
-
