@@ -393,6 +393,52 @@ public:
   entity_inst_t get_owner() const { return owner; }
 };
 
+struct ObjectRecovery {
+  hobject_t soid;
+  eversion_t t;
+  ObjectContextRef head;
+  ObjectContextRef obc;
+  ObjectRecovery(hobject_t oid, eversion_t _t, ObjectContextRef _head,
+                 ObjectContextRef _obc) : soid(oid), t(_t), head(_head),
+                 obc(_obc) {}
+  ostream &operator<<(ostream &rhs) {
+    return rhs << "ObjectRecovery";
+  }
+};
+
+class BackgroundIoQueueable {
+  typedef boost::variant<
+    ObjectRecovery
+    > QVariant;
+  QVariant qvariant;
+  int cost; 
+  unsigned priority;
+  utime_t start_time;
+  entity_inst_t owner;
+  struct RunVis : public boost::static_visitor<> {
+    OSD *osd;
+    PGRef &pg;
+    ThreadPool::TPHandle &handle;
+    RunVis(OSD *osd, PGRef &pg, ThreadPool::TPHandle &handle)
+      : osd(osd), pg(pg), handle(handle) {}
+    void operator() (ObjectRecovery &rec);
+  };
+public:
+  BackgroundIoQueueable(
+    const ObjectRecovery &rec, int cost, unsigned priority, utime_t start_time,
+    const entity_inst_t &owner)
+    : qvariant(rec), cost(cost), priority(priority), start_time(start_time),
+      owner(owner) {}
+  void run(OSD *osd, PGRef &pg, ThreadPool::TPHandle &handle) {
+    RunVis v(osd, pg, handle);
+    boost::apply_visitor(v, qvariant);
+  }
+  unsigned get_priority() const { return priority; }
+  int get_cost() const { return cost; }
+  utime_t get_start_time() const { return start_time; }
+  entity_inst_t get_owner() const { return owner; }
+};
+
 class OSDService {
 public:
   OSD *osd;
@@ -415,6 +461,7 @@ public:
   ShardedThreadPool::ShardedWQ < pair <PGRef, PGQueueable> > &op_wq;
   ThreadPool::BatchWorkQueue<PG> &peering_wq;
   ThreadPool::WorkQueue<PG> &recovery_wq;
+  ThrottledThreadPool::ThrottledWQ<pair <PGRef, BackgroundIoQueueable> > &background_io_wq;
   GenContextWQ recovery_gen_wq;
   GenContextWQ op_gen_wq;
   ClassHandler  *&class_handler;
@@ -849,6 +896,7 @@ public:
 	  ceph_clock_now(cct),
 	  entity_inst_t())));
   }
+  void queue_for_background_io(PG *pg, ObjectRecovery rec);
 
   // osd map cache (past osd maps)
   Mutex map_cache_lock;
@@ -1263,6 +1311,7 @@ private:
   ThreadPool recovery_tp;
   ThreadPool disk_tp;
   ThreadPool command_tp;
+  ThrottledThreadPool background_io_tp;
 
   bool paused_recovery;
 
@@ -2272,6 +2321,37 @@ protected:
       remove_queue.clear();
     }
   } remove_wq;
+
+  // -- background io --
+  friend class BackgroundIoQueueable;
+  struct BackgroundIoWQ : public ThrottledThreadPool::ThrottledWQ< pair<PGRef, BackgroundIoQueueable> > {
+    PrioritizedQueue< pair<PGRef, BackgroundIoQueueable>, entity_inst_t> pqueue;
+    Mutex pq_lock;
+    // LeakyBucketThrottle throttle;
+    OSD *osd;
+
+    BackgroundIoWQ(OSD *o, time_t ti, time_t si, ThrottledThreadPool *tp)
+      : ThrottledThreadPool::ThrottledWQ< pair<PGRef, BackgroundIoQueueable> >("OSD::BackgroundIoWQ", ti, si, tp),
+        pqueue(osd->cct->_conf->osd_op_pq_max_tokens_per_priority, osd->cct->_conf->osd_op_pq_min_cost),
+        pq_lock("OSD:BackgroundIoWQ:lock", false, true, false, osd->cct), osd(o) {}
+
+    bool _empty() {
+      return pqueue.empty();
+    }
+    void _enqueue(pair<PGRef, BackgroundIoQueueable>);
+    void _enqueue_front(pair<PGRef, BackgroundIoQueueable>);
+    // pair<PGRef, BackgroundIoQueueable> _dequeue();
+    void _process(heartbeat_handle_d *);
+    bool can_schedule();
+    // using ThreadPool::WorkQueue<PG>::_process;
+    // void _clear() {
+    //   while (!osd->recovery_queue.empty()) {
+    //     PG *pg = osd->recovery_queue.front();
+    //     osd->recovery_queue.pop_front();
+    //     pg->put("RecoveryWQ");
+    //   }
+    // }
+  } background_io_wq;
 
  private:
   bool ms_can_fast_dispatch_any() const { return true; }

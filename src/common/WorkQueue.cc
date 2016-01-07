@@ -438,3 +438,223 @@ void ShardedThreadPool::drain()
   ldout(cct,10) << "drained" << dendl;
 }
 
+ThrottledThreadPool::ThrottledThreadPool(CephContext *cct_, string nm, int n, const char *option)
+  : cct(cct_), name(nm),
+    lockname(nm + "::lock"),
+    _lock(lockname.c_str()),  // this should be safe due to declaration order
+    _stop(false),
+    _pause(0),
+    _draining(0),
+    _num_threads(n),
+    processing(0)
+{
+  if (option) {
+    _thread_num_option = option;
+    // set up conf_keys
+    _conf_keys = new const char*[2];
+    _conf_keys[0] = _thread_num_option.c_str();
+    _conf_keys[1] = NULL;
+  } else {
+    _conf_keys = new const char*[1];
+    _conf_keys[0] = NULL;
+  }
+}
+
+ThrottledThreadPool::~ThrottledThreadPool()
+{
+  assert(throttled_threads.empty());
+  delete[] _conf_keys;
+}
+
+void ThrottledThreadPool::handle_conf_change(const struct md_config_t *conf,
+                                               const std::set <std::string> &changed)
+{
+  if (changed.count(_thread_num_option)) {
+    char *buf;
+    int r = conf->get_val(_thread_num_option.c_str(), &buf, -1);
+    assert(r >= 0);
+    int v = atoi(buf);
+    free(buf);
+    if (v > 0) {
+      _lock.Lock();
+      _num_threads = v;
+      start_threads();
+      _cond.SignalAll();
+      _lock.Unlock();
+    }
+  }
+}
+
+void ThrottledThreadPool::throttledthreadpool_worker(ThrottledWorkThread *wt)
+{
+  _lock.Lock();
+  ldout(cct,10) << "worker start" << dendl;
+
+  std::stringstream ss;
+  ss << name << " thread " << (void*)pthread_self();
+  heartbeat_handle_d *hb = cct->get_heartbeat_map()->add_worker(ss.str());
+
+  while (!_stop) {
+
+    // manage dynamic thread pool
+    join_old_threads();
+    if (throttled_threads.size() > _num_threads) {
+      ldout(cct,1) << __func__ << " worker shutting down; too many threads ("
+                   << throttled_threads.size() << " > "
+		   << _num_threads << ")" << dendl;
+      throttled_threads.erase(wt);
+      _old_threads.push_back(wt);
+      break;
+    }
+
+    while (!_pause && wq->can_schedule() && !wq->empty()) {
+      // void *item = wq->_void_dequeue();
+      // if (item) {
+        processing++;
+      //  ldout(cct,12) << "worker wq " << wq->name << " start processing " << item
+      //		<< " (" << processing << " active)" << dendl;
+        cct->get_heartbeat_map()->reset_timeout(hb, wq->timeout_interval,
+	                                        wq->suicide_interval);
+        _lock.Unlock();
+        wq->_void_process(hb);
+        _lock.Lock();
+        wq->_void_process_finish();
+        processing--;
+        // ldout(cct,15) << "worker wq " << wq->name << " done processing " << item
+      	// 	<< " (" << processing << " active)" << dendl;
+        if (_pause || _draining)
+          _wait_cond.Signal();
+        // did = true;
+        // break;
+      // } else {
+      //   break;
+      // }
+    }
+
+    ldout(cct,20) << "worker waiting" << dendl;
+    cct->get_heartbeat_map()->reset_timeout(
+      hb,
+      cct->_conf->threadpool_default_timeout,
+      0);
+    _cond.WaitInterval(cct, _lock,
+      utime_t(
+	cct->_conf->threadpool_empty_queue_max_wait, 0));
+  }
+
+  ldout(cct,1) << "worker finish" << dendl;
+  cct->get_heartbeat_map()->remove_worker(hb);
+  _lock.Unlock();
+}
+
+void ThrottledThreadPool::start_threads()
+{
+  assert(_lock.is_locked());
+  while (throttled_threads.size() < _num_threads) {
+    ThrottledWorkThread *wt = new ThrottledWorkThread(this);
+    ldout(cct, 10) << __func__ << " creating and starting " << wt << dendl;
+    throttled_threads.insert(wt);
+
+    wt->create();
+  }
+}
+
+void ThrottledThreadPool::join_old_threads()
+{
+  assert(_lock.is_locked());
+  while (!_old_threads.empty()) {
+    ldout(cct, 10) << __func__ << " joining and deleting " << _old_threads.front() << dendl;
+    _old_threads.front()->join();
+    delete _old_threads.front();
+    _old_threads.pop_front();
+  }
+}
+
+void ThrottledThreadPool::start()
+{
+  ldout(cct,10) << "start" << dendl;
+
+  if (_thread_num_option.length()) {
+    ldout(cct, 10) << " registering config observer on " << _thread_num_option << dendl;
+    cct->_conf->add_observer(this);
+  }
+
+  _lock.Lock();
+  start_threads();
+  _lock.Unlock();
+  ldout(cct,15) << "started" << dendl;
+}
+
+void ThrottledThreadPool::stop(bool clear_after)
+{
+  ldout(cct,10) << "stop" << dendl;
+
+  if (_thread_num_option.length()) {
+    ldout(cct, 10) << " unregistering config observer on " << _thread_num_option << dendl;
+    cct->_conf->remove_observer(this);
+  }
+
+  _lock.Lock();
+  _stop = true;
+  _cond.Signal();
+  join_old_threads();
+  _lock.Unlock();
+  for (set<ThrottledWorkThread*>::iterator p = throttled_threads.begin();
+       p != throttled_threads.end();
+       ++p) {
+    (*p)->join();
+    delete *p;
+  }
+  throttled_threads.clear();
+  _lock.Lock();
+  _stop = false;
+  _lock.Unlock();    
+  ldout(cct,15) << "stopped" << dendl;
+}
+
+void ThrottledThreadPool::pause()
+{
+  ldout(cct,10) << "pause" << dendl;
+  _lock.Lock();
+  _pause++;
+  while (processing)
+    _wait_cond.Wait(_lock);
+  _lock.Unlock();
+  ldout(cct,15) << "paused" << dendl;
+}
+
+void ThrottledThreadPool::pause_new()
+{
+  ldout(cct,10) << "pause_new" << dendl;
+  _lock.Lock();
+  _pause++;
+  _lock.Unlock();
+}
+
+void ThrottledThreadPool::unpause()
+{
+  ldout(cct,10) << "unpause" << dendl;
+  _lock.Lock();
+  assert(_pause > 0);
+  _pause--;
+  _cond.Signal();
+  _lock.Unlock();
+}
+
+void ThrottledThreadPool::drain(BaseThrottledWQ* wq)
+{
+  ldout(cct,10) << "drain" << dendl;
+  _lock.Lock();
+  _draining++;
+  while (processing || (wq != NULL && !wq->empty()))
+    _wait_cond.Wait(_lock);
+  _draining--;
+  _lock.Unlock();
+}
+
+// void ThrottledThreadPool::account_throttle(uint64_t size)
+// {
+//   ldout(cct,10) << "account_throttle" << dendl;
+//   _lock.Lock();
+//   throttle.account(size);
+//   _lock.Unlock();
+// }

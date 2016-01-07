@@ -1132,8 +1132,7 @@ protected:
   hobject_t last_backfill_started;
   bool new_backfill;
 
-  int prep_object_replica_pushes(const hobject_t& soid, eversion_t v,
-				 PGBackend::RecoveryHandle *h);
+  int prep_object_replica_pushes(const hobject_t& soid, eversion_t v);
 
   void finish_degraded_object(const hobject_t& oid);
 
@@ -1143,8 +1142,7 @@ protected:
   int recover_missing(
     const hobject_t& oid,
     eversion_t v,
-    int priority,
-    PGBackend::RecoveryHandle *h);
+    int priority);
 
   // low level ops
 
@@ -1245,17 +1243,17 @@ protected:
 
   void queue_for_recovery();
   bool start_recovery_ops(
-    int max, ThreadPool::TPHandle &handle, int *started);
+    ThreadPool::TPHandle &handle, int *started);
 
-  int recover_primary(int max, ThreadPool::TPHandle &handle);
-  int recover_replicas(int max, ThreadPool::TPHandle &handle);
+  int recover_primary(ThreadPool::TPHandle &handle);
+  int recover_replicas(ThreadPool::TPHandle &handle);
   hobject_t earliest_peer_backfill() const;
   bool all_peer_done() const;
   /**
    * @param work_started will be set to true if recover_backfill got anywhere
    * @returns the number of operations started
    */
-  int recover_backfill(int max, ThreadPool::TPHandle &handle,
+  int recover_backfill(ThreadPool::TPHandle &handle,
                        bool *work_started);
 
   /**
@@ -1279,8 +1277,7 @@ protected:
 
   void prep_backfill_object_push(
     hobject_t oid, eversion_t v, ObjectContextRef obc,
-    vector<pg_shard_t> peers,
-    PGBackend::RecoveryHandle *h);
+    vector<pg_shard_t> peers);
   void send_remove_op(const hobject_t& oid, eversion_t v, pg_shard_t peer);
 
 

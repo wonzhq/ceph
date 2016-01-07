@@ -166,6 +166,10 @@ void PGQueueable::RunVis::operator()(PGScrub &op) {
   return pg->scrub(op.epoch_queued, handle);
 }
 
+void BackgroundIoQueueable::RunVis::operator()(ObjectRecovery &rec) {
+  // TODO
+}
+
 //Initial features in new superblock.
 //Features here are also automatically upgraded
 CompatSet OSD::get_osd_initial_compat_set() {
@@ -211,6 +215,7 @@ OSDService::OSDService(OSD *osd) :
   op_wq(osd->op_shardedwq),
   peering_wq(osd->peering_wq),
   recovery_wq(osd->recovery_wq),
+  background_io_wq(osd->background_io_wq),
   recovery_gen_wq("recovery_gen_wq", cct->_conf->osd_recovery_thread_timeout,
 		  &osd->recovery_tp),
   op_gen_wq("op_gen_wq", cct->_conf->osd_recovery_thread_timeout, &osd->osd_tp),
@@ -1353,6 +1358,18 @@ void OSDService::queue_for_peering(PG *pg)
   peering_wq.queue(pg);
 }
 
+void OSDService::queue_for_background_io(PG *pg, ObjectRecovery rec)
+{
+  background_io_wq.queue(make_pair(pg,
+        BackgroundIoQueueable(rec, cct->_conf->osd_scrub_cost,
+        cct->_conf->osd_scrub_priority, ceph_clock_now(cct), entity_inst_t())));
+  //if (b)
+  //  dout(10) << "queue_for_background_io queued " << *pg << dendl;
+  //else
+  //  dout(10) << "queue_for_background_io already queued " << *pg << dendl;
+  return;
+}
+
 
 // ====================================================================
 // OSD
@@ -1569,6 +1586,7 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
   recovery_tp(cct, "OSD::recovery_tp", cct->_conf->osd_recovery_threads, "osd_recovery_threads"),
   disk_tp(cct, "OSD::disk_tp", cct->_conf->osd_disk_threads, "osd_disk_threads"),
   command_tp(cct, "OSD::command_tp", 1),
+  background_io_tp(cct, "OSD::background_io_tp", cct->_conf->osd_recovery_threads, "osd_background_io_threads"),
   paused_recovery(false),
   session_waiting_lock("OSD::session_waiting_lock"),
   heartbeat_lock("OSD::heartbeat_lock"),
@@ -1622,6 +1640,13 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
     cct->_conf->osd_remove_thread_timeout,
     cct->_conf->osd_remove_thread_suicide_timeout,
     &disk_tp),
+  background_io_wq(
+    this,
+    //cct->_conf->osd_background_io_thread_timeout,
+    //cct->_conf->osd_background_io_thread_suicide_timeout,
+    cct->_conf->osd_recovery_thread_timeout,
+    cct->_conf->osd_recovery_thread_suicide_timeout,
+    &background_io_tp),
   service(this)
 {
   monc->set_messenger(client_messenger);
@@ -7921,83 +7946,57 @@ bool OSD::_recover_now()
 
 void OSD::do_recovery(PG *pg, ThreadPool::TPHandle &handle)
 {
-  if (g_conf->osd_recovery_sleep > 0) {
-    utime_t t;
-    t.set_from_double(g_conf->osd_recovery_sleep);
-    t.sleep();
-    dout(20) << __func__ << " slept for " << t << dendl;
-  }
-
-  // see how many we should try to start.  note that this is a bit racy.
-  recovery_wq.lock();
-  int max = MIN(cct->_conf->osd_recovery_max_active - recovery_ops_active,
-      cct->_conf->osd_recovery_max_single_start);
-  if (max > 0) {
-    dout(10) << "do_recovery can start " << max << " (" << recovery_ops_active << "/" << cct->_conf->osd_recovery_max_active
-	     << " rops)" << dendl;
-    recovery_ops_active += max;  // take them now, return them if we don't use them.
-  } else {
-    dout(10) << "do_recovery can start 0 (" << recovery_ops_active << "/" << cct->_conf->osd_recovery_max_active
-	     << " rops)" << dendl;
-  }
-  recovery_wq.unlock();
-
-  if (max <= 0) {
-    dout(10) << "do_recovery raced and failed to start anything; requeuing " << *pg << dendl;
-    recovery_wq.queue(pg);
+  pg->lock_suspend_timeout(handle);
+  if (pg->deleting || !(pg->is_peered() && pg->is_primary())) {
+    pg->unlock();
+    recovery_wq.lock();
+    recovery_wq._wake();
+    recovery_wq.unlock();
     return;
-  } else {
-    pg->lock_suspend_timeout(handle);
-    if (pg->deleting || !(pg->is_peered() && pg->is_primary())) {
-      pg->unlock();
-      goto out;
-    }
-    
-    dout(10) << "do_recovery starting " << max << " " << *pg << dendl;
+  }
+
+  dout(10) << "do_recovery starting " << *pg << dendl;
 #ifdef DEBUG_RECOVERY_OIDS
-    dout(20) << "  active was " << recovery_oids[pg->info.pgid] << dendl;
+  dout(20) << "  active was " << recovery_oids[pg->info.pgid] << dendl;
 #endif
     
-    int started = 0;
-    bool more = pg->start_recovery_ops(max, handle, &started);
-    dout(10) << "do_recovery started " << started << "/" << max << " on " << *pg << dendl;
-    // If no recovery op is started, don't bother to manipulate the RecoveryCtx
-    if (!started && (more || !pg->have_unfound())) {
-      pg->unlock();
-      goto out;
-    }
-
-    PG::RecoveryCtx rctx = create_context();
-    rctx.handle = &handle;
-
-    /*
-     * if we couldn't start any recovery ops and things are still
-     * unfound, see if we can discover more missing object locations.
-     * It may be that our initial locations were bad and we errored
-     * out while trying to pull.
-     */
-    if (!more && pg->have_unfound()) {
-      pg->discover_all_missing(*rctx.query_map);
-      if (rctx.query_map->empty()) {
-	dout(10) << "do_recovery  no luck, giving up on this pg for now" << dendl;
-	recovery_wq.lock();
-	recovery_wq._dequeue(pg);
-	recovery_wq.unlock();
-      }
-    }
-
-    pg->write_if_dirty(*rctx.transaction);
-    OSDMapRef curmap = pg->get_osdmap();
+  int started = 0;
+  bool more = pg->start_recovery_ops(handle, &started);
+  dout(10) << "do_recovery started " << started << " on " << *pg << dendl;
+  // If no recovery op is started, don't bother to manipulate the RecoveryCtx
+  if (!started && (more || !pg->have_unfound())) {
     pg->unlock();
-    dispatch_context(rctx, pg, curmap);
+    recovery_wq.lock();
+    recovery_wq._wake();
+    recovery_wq.unlock();
+    return;
   }
 
- out:
-  recovery_wq.lock();
-  if (max > 0) {
-    assert(recovery_ops_active >= max);
-    recovery_ops_active -= max;
+  PG::RecoveryCtx rctx = create_context();
+  rctx.handle = &handle;
+
+  /*
+   * if we couldn't start any recovery ops and things are still
+   * unfound, see if we can discover more missing object locations.
+   * It may be that our initial locations were bad and we errored
+   * out while trying to pull.
+   */
+  if (!more && pg->have_unfound()) {
+    pg->discover_all_missing(*rctx.query_map);
+    if (rctx.query_map->empty()) {
+      dout(10) << "do_recovery  no luck, giving up on this pg for now" << dendl;
+      recovery_wq.lock();
+      recovery_wq._dequeue(pg);
+      recovery_wq.unlock();
+    }
   }
+
+  pg->write_if_dirty(*rctx.transaction);
+  OSDMapRef curmap = pg->get_osdmap();
+  pg->unlock();
+  dispatch_context(rctx, pg, curmap);
+
+  recovery_wq.lock();
   recovery_wq._wake();
   recovery_wq.unlock();
 }
@@ -8879,4 +8878,61 @@ void OSD::PeeringWQ::_dequeue(list<PG*> *out) {
         }
   }
   in_use.insert(got.begin(), got.end());
+}
+
+void OSD::BackgroundIoWQ::_process(heartbeat_handle_d *hb)
+{
+  pq_lock.Lock();
+  if (pqueue.empty())
+    return;
+  pair<PGRef, BackgroundIoQueueable> item = pqueue.dequeue();
+  pq_lock.Unlock();
+
+  ThreadPool::TPHandle tp_handle(osd->cct, hb, timeout_interval, 
+    suicide_interval);
+  (item.first)->lock_suspend_timeout(tp_handle);
+  item.second.run(osd, item.first, tp_handle);
+  (item.first)->unlock();
+}
+
+void OSD::BackgroundIoWQ::_enqueue(pair<PGRef, BackgroundIoQueueable> item)
+{
+  unsigned priority = item.second.get_priority();
+  unsigned cost = item.second.get_cost();
+ 
+  Mutex::Locker l(pq_lock);
+  if (priority >= CEPH_MSG_PRIO_LOW)
+    pqueue.enqueue_strict(
+      item.second.get_owner(), priority, item);
+  else
+    pqueue.enqueue(
+      item.second.get_owner(),
+      priority, cost, item);
+
+  // sdata->sdata_lock.Lock();
+  // sdata->sdata_cond.SignalOne();
+  // sdata->sdata_lock.Unlock();
+}
+
+void OSD::BackgroundIoWQ::_enqueue_front(pair<PGRef, BackgroundIoQueueable> item) {
+
+  unsigned priority = item.second.get_priority();
+  unsigned cost = item.second.get_cost();
+  Mutex::Locker l(pq_lock);
+
+  if (priority >= CEPH_MSG_PRIO_LOW)
+    pqueue.enqueue_strict_front(item.second.get_owner(),
+                                priority, item);
+  else
+    pqueue.enqueue_front(item.second.get_owner(),
+                         priority, cost, item);
+
+  // sdata->sdata_lock.Lock();
+  // sdata->sdata_cond.SignalOne();
+  // sdata->sdata_lock.Unlock();
+}
+
+bool OSD::BackgroundIoWQ::can_schedule()
+{
+  return true; // TODO
 }

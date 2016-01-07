@@ -717,5 +717,175 @@ public:
 
 };
 
+class ThrottledThreadPool : public md_config_obs_t {
+  CephContext *cct;
+  string name;
+  string lockname;
+  Mutex _lock;
+  Cond _cond;
+  bool _stop;
+  int _pause;
+  int _draining;
+  Cond _wait_cond;
+  unsigned _num_threads;
+  string _thread_num_option;
+  const char **_conf_keys;
+
+public:
+
+  class BaseThrottledWQ {
+  public:
+    string name;
+    time_t timeout_interval, suicide_interval;
+    BaseThrottledWQ(string n, time_t ti, time_t sti)
+      : name(n), timeout_interval(ti), suicide_interval(sti) {}
+    virtual ~BaseThrottledWQ() {}
+
+    // virtual void _clear() = 0;
+    virtual bool empty() = 0;
+    virtual bool can_schedule() = 0;
+    // virtual void *_void_dequeue() = 0;
+    virtual void _void_process(heartbeat_handle_d *hb) = 0;
+    virtual void _void_process_finish() = 0;
+  };
+
+  template <typename T>
+  class ThrottledWQ: public BaseThrottledWQ {
+    ThrottledThreadPool *pool;
+
+  protected:
+    // virtual bool _enqueue(T *) = 0;
+    // virtual void _dequeue(T *) = 0;
+    // virtual T _dequeue() = 0;
+    virtual bool _empty() = 0;
+    virtual void _process(heartbeat_handle_d *) = 0;
+    virtual void _process_finish() {}
+    virtual void _enqueue(T) = 0;
+    virtual void _enqueue_front(T) = 0;
+    // virtual void _process(T *t) { assert(0); }
+    virtual bool can_schedule() = 0;
+
+  public:
+    ThrottledWQ(string n, time_t ti, time_t sti, ThrottledThreadPool* tp):
+      BaseThrottledWQ(n, ti, sti), pool(tp) {
+      tp->set_wq(this);
+    }
+    virtual ~ThrottledWQ() {}
+
+    //void *_void_dequeue() {
+    //  {
+    //    if (_empty())
+    //      return 0;
+    //  }
+    //  return ((void*)1); // Not used
+    //}
+    void _void_process(heartbeat_handle_d *hb) {
+      _process(hb);
+    }
+    void _void_process_finish() {
+      _process_finish();
+    }
+    bool empty() {
+      return _empty();
+    }
+    void queue(T item) {
+      _enqueue(item);
+    }
+    void queue_front(T item) {
+      _enqueue_front(item);
+    }
+    void drain() {
+      pool->drain();
+    }
+    //void account_throttle(uint64_t size) {
+    //  pool->account_throttle(size);
+    //}
+  };
+
+private:
+
+  BaseThrottledWQ* wq;
+  // threads
+  struct ThrottledWorkThread : public Thread {
+    ThrottledThreadPool *pool;
+    uint32_t thread_index;
+    ThrottledWorkThread(ThrottledThreadPool *p): pool(p) {}
+    void *entry() {
+      pool->throttledthreadpool_worker(this);
+      return 0;
+    }
+  };
+
+  set<ThrottledWorkThread*> throttled_threads;
+  list<ThrottledWorkThread*> _old_threads;  ///< need to be joined
+  int processing;
+
+  void start_threads();
+  void join_old_threads();
+  void throttledthreadpool_worker(ThrottledWorkThread *thread);
+  void set_wq(BaseThrottledWQ* lb_wq) {
+    wq = lb_wq;
+  }
+
+public:
+
+  ThrottledThreadPool(CephContext *cct_, string nm, int n, const char *option = NULL);
+  ~ThrottledThreadPool();
+
+  const char **get_tracked_conf_keys() const {
+    return _conf_keys;
+  }
+  void handle_conf_change(const struct md_config_t *conf,
+			  const std::set <std::string> &changed);
+
+  /// return number of threads currently running
+  int get_num_threads() {
+    Mutex::Locker l(_lock);
+    return _num_threads;
+  }
+  
+  /// take thread pool lock
+  void lock() {
+    _lock.Lock();
+  }
+  /// release thread pool lock
+  void unlock() {
+    _lock.Unlock();
+  }
+
+  /// wait for a kick on this thread pool
+  void wait(Cond &c) {
+    c.Wait(_lock);
+  }
+
+  /// wake up a waiter (with lock already held)
+  void _wake() {
+    _cond.Signal();
+  }
+  /// wake up a waiter (without lock held)
+  void wake() {
+    Mutex::Locker l(_lock);
+    _cond.Signal();
+  }
+  void _wait() {
+    _cond.Wait(_lock);
+  }
+
+  /// start thread pool thread
+  void start();
+  /// stop thread pool thread
+  void stop(bool clear_after=true);
+  /// pause thread pool (if it not already paused)
+  void pause();
+  /// pause initiation of new work
+  void pause_new();
+  /// resume work in thread pool.  must match each pause() call 1:1 to resume.
+  void unpause();
+  /// wait for all work to complete
+  void drain(BaseThrottledWQ *wq = 0);
+  // /// account the throttle
+  // void account_throttle(uint64_t size);
+
+};
 
 #endif
