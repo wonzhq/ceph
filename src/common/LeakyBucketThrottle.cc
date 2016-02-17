@@ -248,10 +248,7 @@ double LeakyBucketThrottle::throttle_compute_wait(LeakyBucket *bkt)
 
   /* the number of extra units blocking the io */
   double extra = 0;
-  if (mode == THROTTLE_MODE_STATIC && allow_burst)
-    extra = bkt->level - bkt->max;
-  else
-    extra = bkt->level - bkt->avg;
+  extra = bkt->level - bkt->avg;
 
   if (extra <= 0)
     return 0;

@@ -12837,7 +12837,7 @@ void ReplicatedPG::object_recovery(const hobject_t &hoid, eversion_t v,
   // take the read lock for push
   if (head == ObjectContextRef())
     obc->ondisk_read_lock();
-  pgbackend->recover_object(soid, v, head, obc, h);
+  pgbackend->recover_object(hoid, v, head, obc, h);
   if (head == ObjectContextRef())
     obc->ondisk_read_unlock();
   pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);

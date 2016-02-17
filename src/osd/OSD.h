@@ -55,6 +55,7 @@ using namespace std;
 #include "common/PrioritizedQueue.h"
 #include "messages/MOSDOp.h"
 #include "include/Spinlock.h"
+#include "common/LeakyBucketThrottle.h"
 
 #define CEPH_OSD_PROTOCOL    10 /* cluster internal */
 
@@ -2333,7 +2334,8 @@ protected:
     BackgroundIoWQ(OSD *o, time_t ti, time_t si, ThreadPool *tp)
       : ThreadPool::ThrottledWQ< pair<PGRef, BackgroundIoQueueable> >("OSD::BackgroundIoWQ", ti, si, tp),
         pqueue(osd->cct->_conf->osd_op_pq_max_tokens_per_priority, osd->cct->_conf->osd_op_pq_min_cost),
-        pq_lock("OSD:BackgroundIoWQ:lock", false, true, false, osd->cct), osd(o) {}
+        pq_lock("OSD:BackgroundIoWQ:lock", false, true, false, osd->cct),
+        throttle(osd->cct, 0), osd(o) {}
 
     bool _empty() {
       Mutex::Locker l(pq_lock);
