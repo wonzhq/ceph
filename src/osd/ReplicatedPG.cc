@@ -9122,12 +9122,6 @@ int ReplicatedPG::recover_missing(
   assert(!recovering.count(soid));
   recovering.insert(make_pair(soid, obc));
   osd->queue_for_background_io(this, ObjectRecovery(soid, v, head_obc, obc));
-  //pgbackend->recover_object(
-  //  soid,
-  //  v,
-  //  head_obc,
-  //  obc,
-  //  h);
   return PULL_YES;
 }
 
@@ -10291,20 +10285,6 @@ int ReplicatedPG::prep_object_replica_pushes(
   start_recovery_op(soid);
   assert(!recovering.count(soid));
   recovering.insert(make_pair(soid, obc));
-
-  ///* We need this in case there is an in progress write on the object.  In fact,
-  // * the only possible write is an update to the xattr due to a lost_revert --
-  // * a client write would be blocked since the object is degraded.
-  // * In almost all cases, therefore, this lock should be uncontended.
-  // */
-  //obc->ondisk_read_lock();
-  //pgbackend->recover_object(
-  //  soid,
-  //  v,
-  //  ObjectContextRef(),
-  //  obc, // has snapset context
-  //  h);
-  //obc->ondisk_read_unlock();
   osd->queue_for_background_io(this, ObjectRecovery(soid, v, ObjectContextRef(), obc));
   return 1;
 }
@@ -10830,16 +10810,6 @@ void ReplicatedPG::prep_backfill_object_push(
 
   start_recovery_op(oid);
   recovering.insert(make_pair(oid, obc));
-
-  //// We need to take the read_lock here in order to flush in-progress writes
-  //obc->ondisk_read_lock();
-  //pgbackend->recover_object(
-  //  oid,
-  //  v,
-  //  ObjectContextRef(),
-  //  obc,
-  //  h);
-  //obc->ondisk_read_unlock();
   osd->queue_for_background_io(this, ObjectRecovery(oid, v, ObjectContextRef(), obc));
 }
 
@@ -12858,6 +12828,19 @@ int ReplicatedPG::getattrs_maybe_cache(
     tmp.swap(*out);
   }
   return r;
+}
+
+void ReplicatedPG::object_recovery(const hobject_t &hoid, eversion_t v,
+                                   ObjectContextRef head, ObjectContextRef obc)
+{
+  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
+  // take the read lock for push
+  if (head == ObjectContextRef())
+    obc->ondisk_read_lock();
+  pgbackend->recover_object(soid, v, head, obc, h);
+  if (head == ObjectContextRef())
+    obc->ondisk_read_unlock();
+  pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
 }
 
 void intrusive_ptr_add_ref(ReplicatedPG *pg) { pg->get("intptr"); }

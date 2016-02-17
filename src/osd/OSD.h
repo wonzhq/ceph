@@ -2327,7 +2327,7 @@ protected:
   struct BackgroundIoWQ : public ThreadPool::ThrottledWQ< pair<PGRef, BackgroundIoQueueable> > {
     PrioritizedQueue< pair<PGRef, BackgroundIoQueueable>, entity_inst_t> pqueue;
     Mutex pq_lock;
-    // LeakyBucketThrottle throttle;
+    LeakyBucketThrottle throttle;
     OSD *osd;
 
     BackgroundIoWQ(OSD *o, time_t ti, time_t si, ThreadPool *tp)
@@ -2347,7 +2347,12 @@ protected:
       return pqueue.dequeue();
     };
     void _process(pair<PGRef, BackgroundIoQueueable>, ThreadPool::TPHandle &);
-    bool _can_schedule();
+    bool _can_schedule() {
+      if (throttle.enabled())
+        return throttle.can_schedule();
+      else
+	return true;
+    }
     void _account(pair<PGRef, BackgroundIoQueueable>);
     // void _clear() {
     //   while (!osd->recovery_queue.empty()) {

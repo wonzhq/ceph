@@ -1481,6 +1481,9 @@ public:
   int do_tmapup_slow(OpContext *ctx, bufferlist::iterator& bp, OSDOp& osd_op, bufferlist& bl);
 
   void do_osd_op_effects(OpContext *ctx, const ConnectionRef& conn);
+  void object_recovery(const hobject_t &hoid, eversion_t v,
+                       ObjectContextRef head, ObjectContextRef obc);
+
 private:
   hobject_t earliest_backfill() const;
   bool check_src_targ(const hobject_t& soid, const hobject_t& toid) const;

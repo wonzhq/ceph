@@ -167,7 +167,7 @@ void PGQueueable::RunVis::operator()(PGScrub &op) {
 }
 
 void BackgroundIoQueueable::RunVis::operator()(ObjectRecovery &rec) {
-  // TODO
+  return pg->object_recovery(rec.soid, rec.t, rec.head, rec.obc);
 }
 
 //Initial features in new superblock.
@@ -8880,7 +8880,8 @@ void OSD::PeeringWQ::_dequeue(list<PG*> *out) {
   in_use.insert(got.begin(), got.end());
 }
 
-void OSD::BackgroundIoWQ::_process(pair<PGRef, BackgroundIoQueueable> item, ThreadPool::TPHandle &tp_handle)
+void OSD::BackgroundIoWQ::_process(pair<PGRef, BackgroundIoQueueable> item,
+                                   ThreadPool::TPHandle &tp_handle)
 {
   (item.first)->lock_suspend_timeout(tp_handle);
   item.second.run(osd, item.first, tp_handle);
@@ -8900,14 +8901,10 @@ void OSD::BackgroundIoWQ::_enqueue(pair<PGRef, BackgroundIoQueueable> item)
     pqueue.enqueue(
       item.second.get_owner(),
       priority, cost, item);
-
-  // sdata->sdata_lock.Lock();
-  // sdata->sdata_cond.SignalOne();
-  // sdata->sdata_lock.Unlock();
 }
 
-void OSD::BackgroundIoWQ::_enqueue_front(pair<PGRef, BackgroundIoQueueable> item) {
-
+void OSD::BackgroundIoWQ::_enqueue_front(pair<PGRef, BackgroundIoQueueable> item)
+{
   unsigned priority = item.second.get_priority();
   unsigned cost = item.second.get_cost();
 
@@ -8918,17 +8915,13 @@ void OSD::BackgroundIoWQ::_enqueue_front(pair<PGRef, BackgroundIoQueueable> item
   else
     pqueue.enqueue_front(item.second.get_owner(),
                          priority, cost, item);
-
-  // sdata->sdata_lock.Lock();
-  // sdata->sdata_cond.SignalOne();
-  // sdata->sdata_lock.Unlock();
 }
 
-bool OSD::BackgroundIoWQ::_can_schedule()
+void OSD::BackgroundIoWQ::_account(pair<PGRef, BackgroundIoQueueable> item)
 {
-  return true; // TODO
-}
+  if (!throttle.enabled())
+    return;
 
-void OSD::BackgroundIoWQ::_account(pair<PGRef, BackgroundIoQueueable>)
-{
+  unsigned cost = item.second.get_cost();
+  throttle.account(cost);
 }
