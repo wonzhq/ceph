@@ -108,6 +108,8 @@ void ThreadPool::worker(WorkThread *wt)
       break;
     }
 
+    ldout(cct,12) << " work_queues.empty() " << work_queues.empty()
+  		  << " _pause " << _pause << dendl;
     if (!_pause && !work_queues.empty()) {
       WorkQueue_* wq;
       int tries = work_queues.size();
@@ -117,6 +119,7 @@ void ThreadPool::worker(WorkThread *wt)
 	last_work_queue %= work_queues.size();
 	wq = work_queues[last_work_queue];
 	
+        ldout(cct,12) << "worker wq " << wq->name << " wq->__can_schedule() " << wq->__can_schedule() << dendl;
 	if (wq->__can_schedule()) {
 	  void *item = wq->_void_dequeue();
 	  if (item) {

@@ -1991,6 +1991,7 @@ int OSD::init()
   recovery_tp.start();
   disk_tp.start();
   command_tp.start();
+  background_io_tp.start();
 
   set_disk_tp_priority();
 
@@ -2457,6 +2458,10 @@ int OSD::shutdown()
   disk_tp.drain();
   disk_tp.stop();
   dout(10) << "disk tp paused (new)" << dendl;
+
+  background_io_tp.drain();
+  background_io_tp.stop();
+  dout(10) << "background io tp stopped" << dendl;
 
   dout(10) << "stopping agent" << dendl;
   service.agent_stop();

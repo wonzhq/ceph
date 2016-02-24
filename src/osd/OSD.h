@@ -2326,16 +2326,17 @@ protected:
   // -- background io --
   friend class BackgroundIoQueueable;
   struct BackgroundIoWQ : public ThreadPool::ThrottledWQ< pair<PGRef, BackgroundIoQueueable> > {
+    OSD *osd;
     PrioritizedQueue< pair<PGRef, BackgroundIoQueueable>, entity_inst_t> pqueue;
     Mutex pq_lock;
     LeakyBucketThrottle throttle;
-    OSD *osd;
 
     BackgroundIoWQ(OSD *o, time_t ti, time_t si, ThreadPool *tp)
       : ThreadPool::ThrottledWQ< pair<PGRef, BackgroundIoQueueable> >("OSD::BackgroundIoWQ", ti, si, tp),
+        osd(o),
         pqueue(osd->cct->_conf->osd_op_pq_max_tokens_per_priority, osd->cct->_conf->osd_op_pq_min_cost),
         pq_lock("OSD:BackgroundIoWQ:lock", false, true, false, osd->cct),
-        throttle(osd->cct, 0), osd(o) {}
+        throttle(osd->cct, 0) {}
 
     bool _empty() {
       Mutex::Locker l(pq_lock);

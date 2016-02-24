@@ -10928,6 +10928,20 @@ void ReplicatedPG::scan_range(
   }
 }
 
+void ReplicatedPG::object_recovery(const hobject_t &hoid, eversion_t v,
+                                   ObjectContextRef head, ObjectContextRef obc)
+{
+  dout(10) << __func__ << " recover object " << hoid << " v " << v << dendl;
+  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
+  // take the read lock for push
+  if (head == ObjectContextRef() && obc != ObjectContextRef())
+    obc->ondisk_read_lock();
+  pgbackend->recover_object(hoid, v, head, obc, h);
+  if (head == ObjectContextRef() && obc != ObjectContextRef())
+    obc->ondisk_read_unlock();
+  pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
+}
+
 
 /** check_local
  * 
@@ -12828,19 +12842,6 @@ int ReplicatedPG::getattrs_maybe_cache(
     tmp.swap(*out);
   }
   return r;
-}
-
-void ReplicatedPG::object_recovery(const hobject_t &hoid, eversion_t v,
-                                   ObjectContextRef head, ObjectContextRef obc)
-{
-  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
-  // take the read lock for push
-  if (head == ObjectContextRef())
-    obc->ondisk_read_lock();
-  pgbackend->recover_object(hoid, v, head, obc, h);
-  if (head == ObjectContextRef())
-    obc->ondisk_read_unlock();
-  pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
 }
 
 void intrusive_ptr_add_ref(ReplicatedPG *pg) { pg->get("intptr"); }
