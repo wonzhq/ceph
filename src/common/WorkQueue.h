@@ -80,6 +80,8 @@ private:
      * so at most one copy will execute simultaneously for a given thread pool.
      * It can be used for non-thread-safe finalization. */
     virtual void _void_process_finish(void *) = 0;
+    // check whether the work queue can be scheduled
+    virtual bool __can_schedule() { return true; }
   };
 
   // track thread pool size changes
@@ -426,6 +428,97 @@ public:
     std::list<T *> m_items;
     uint32_t m_processing;
   };
+
+  template<typename T>
+  class ThrottledWQ : public WorkQueue_ {
+    Mutex _lock;
+    ThreadPool *pool;
+    list<T> to_process;
+    // list<T> to_finish;
+
+    virtual void _enqueue(T) = 0;
+    virtual void _enqueue_front(T) = 0;
+    virtual bool _empty() = 0;
+    virtual T _dequeue() = 0;
+    virtual void _process(T item, TPHandle &) = 0;
+    virtual void _process_finish(T) {}
+    virtual bool _can_schedule() = 0;
+    virtual void _account(T) = 0;
+
+    void *_void_dequeue() {
+      {
+	Mutex::Locker l(_lock);
+	if (_empty())
+	  return 0;
+	T item = _dequeue();
+	to_process.push_back(item);
+      }
+      return ((void*)1); // Not used
+    }
+    void _void_process(void *, TPHandle &handle) {
+      _lock.Lock();
+      assert(!to_process.empty());
+      T item = to_process.front();
+      to_process.pop_front();
+      _lock.Unlock();
+
+      _account(item);
+      _process(item, handle);
+
+      // _lock.Lock();
+      // to_finish.push_back(u);
+      // _lock.Unlock();
+    }
+
+    void _void_process_finish(void *) {
+      // _lock.Lock();
+      // assert(!to_finish.empty());
+      // U u = to_finish.front();
+      // to_finish.pop_front();
+      // _lock.Unlock();
+
+      // _process_finish(u);
+    }
+
+    void _clear() {}
+
+    bool __can_schedule() {
+      return _can_schedule();
+    }
+
+  public:
+    ThrottledWQ(string n, time_t ti, time_t sti, ThreadPool *p)
+      : WorkQueue_(n, ti, sti), _lock("ThrottledWQ::lock"), pool(p) {
+      pool->add_work_queue(this);
+    }
+    ~ThrottledWQ() {
+      pool->remove_work_queue(this);
+    }
+    void queue(T item) {
+      Mutex::Locker l(pool->_lock);
+      _enqueue(item);
+      pool->_cond.SignalOne();
+    }
+    void queue_front(T item) {
+      Mutex::Locker l(pool->_lock);
+      _enqueue_front(item);
+      pool->_cond.SignalOne();
+    }
+    void drain() {
+      pool->drain(this);
+    }
+  protected:
+    void lock() {
+      pool->lock();
+    }
+    void unlock() {
+      pool->unlock();
+    }
+    // virtual void _process(T) { assert(0); }
+    // virtual void _process(T item, TPHandle &) {
+    //   _process(item);
+    // }
+  };
 private:
   vector<WorkQueue_*> work_queues;
   int last_work_queue;
@@ -710,6 +803,5 @@ public:
   void drain();
 
 };
-
 
 #endif
