@@ -1041,7 +1041,7 @@ public:
    * @returns true if any useful work was accomplished; false otherwise
    */
   virtual bool start_recovery_ops(
-    int max, ThreadPool::TPHandle &handle,
+    ThreadPool::TPHandle &handle,
     int *ops_begun) = 0;
 
   void purge_strays();
@@ -2332,6 +2332,9 @@ public:
   virtual void agent_delay() = 0;
   virtual void agent_clear() = 0;
   virtual void agent_choose_mode_restart() = 0;
+  virtual void object_recovery(const hobject_t &hoid, eversion_t v,
+                               ObjectContextRef head,
+			       ObjectContextRef obc) = 0;
 };
 
 ostream& operator<<(ostream& out, const PG& pg);

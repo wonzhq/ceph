@@ -387,14 +387,14 @@ void ReplicatedPG::maybe_kick_recovery(
     dout(7) << "object " << soid << " v " << v << ", is unfound." << dendl;
   } else {
     dout(7) << "object " << soid << " v " << v << ", recovering." << dendl;
-    PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
-    h->cache_dont_need = false;
+    // PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
+    // h->cache_dont_need = false;
     if (is_missing_object(soid)) {
-      recover_missing(soid, v, cct->_conf->osd_client_op_priority, h);
+      recover_missing(soid, v, cct->_conf->osd_client_op_priority);
     } else {
-      prep_object_replica_pushes(soid, v, h);
+      prep_object_replica_pushes(soid, v);
     }
-    pgbackend->run_recovery_op(h, cct->_conf->osd_client_op_priority);
+    // pgbackend->run_recovery_op(h, cct->_conf->osd_client_op_priority);
   }
 }
 
@@ -9121,8 +9121,7 @@ enum { PULL_NONE, PULL_OTHER, PULL_YES };
 
 int ReplicatedPG::recover_missing(
   const hobject_t &soid, eversion_t v,
-  int priority,
-  PGBackend::RecoveryHandle *h)
+  int priority)
 {
   if (missing_loc.is_unfound(soid)) {
     dout(7) << "pull " << soid
@@ -9143,8 +9142,7 @@ int ReplicatedPG::recover_missing(
 	return PULL_NONE;
       } else {
 	int r = recover_missing(
-	  head, pg_log.get_missing().missing.find(head)->second.need, priority,
-	  h);
+	  head, pg_log.get_missing().missing.find(head)->second.need, priority);
 	if (r != PULL_NONE)
 	  return PULL_OTHER;
 	return PULL_NONE;
@@ -9157,8 +9155,7 @@ int ReplicatedPG::recover_missing(
 	return PULL_NONE;
       } else {
 	int r = recover_missing(
-	  head, pg_log.get_missing().missing.find(head)->second.need, priority,
-	  h);
+	  head, pg_log.get_missing().missing.find(head)->second.need, priority);
 	if (r != PULL_NONE)
 	  return PULL_OTHER;
 	return PULL_NONE;
@@ -9180,12 +9177,7 @@ int ReplicatedPG::recover_missing(
   start_recovery_op(soid);
   assert(!recovering.count(soid));
   recovering.insert(make_pair(soid, obc));
-  pgbackend->recover_object(
-    soid,
-    v,
-    head_obc,
-    obc,
-    h);
+  osd->queue_for_background_io(this, ObjectRecovery(soid, v, head_obc, obc));
   return PULL_YES;
 }
 
@@ -10008,7 +10000,7 @@ void PG::MissingLoc::check_recovery_sources(const OSDMapRef osdmap)
   
 
 bool ReplicatedPG::start_recovery_ops(
-  int max, ThreadPool::TPHandle &handle,
+  ThreadPool::TPHandle &handle,
   int *ops_started)
 {
   int& started = *ops_started;
@@ -10036,15 +10028,15 @@ bool ReplicatedPG::start_recovery_ops(
   if (num_missing == num_unfound) {
     // All of the missing objects we have are unfound.
     // Recover the replicas.
-    started = recover_replicas(max, handle);
+    started = recover_replicas(handle);
   }
   if (!started) {
     // We still have missing objects that we should grab from replicas.
-    started += recover_primary(max, handle);
+    started += recover_primary(handle);
   }
   if (!started && num_unfound != get_num_unfound()) {
     // second chance to recovery replicas
-    started = recover_replicas(max, handle);
+    started = recover_replicas(handle);
   }
 
   if (started)
@@ -10053,7 +10045,7 @@ bool ReplicatedPG::start_recovery_ops(
   bool deferred_backfill = false;
   if (recovering.empty() &&
       state_test(PG_STATE_BACKFILL) &&
-      !backfill_targets.empty() && started < max &&
+      !backfill_targets.empty() &&
       missing.num_missing() == 0 &&
       waiting_on_backfill.empty()) {
     if (get_osdmap()->test_flag(CEPH_OSDMAP_NOBACKFILL)) {
@@ -10077,7 +10069,7 @@ bool ReplicatedPG::start_recovery_ops(
       }
       deferred_backfill = true;
     } else {
-      started += recover_backfill(max - started, handle, &work_in_progress);
+      started += recover_backfill(handle, &work_in_progress);
     }
   }
 
@@ -10154,7 +10146,7 @@ bool ReplicatedPG::start_recovery_ops(
  * do one recovery op.
  * return true if done, false if nothing left to do.
  */
-int ReplicatedPG::recover_primary(int max, ThreadPool::TPHandle &handle)
+int ReplicatedPG::recover_primary(ThreadPool::TPHandle &handle)
 {
   assert(is_primary());
 
@@ -10170,7 +10162,6 @@ int ReplicatedPG::recover_primary(int max, ThreadPool::TPHandle &handle)
   int started = 0;
   int skipped = 0;
 
-  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
   map<version_t, hobject_t>::const_iterator p =
     missing.rmissing.lower_bound(pg_log.get_log().last_requested);
   while (p != missing.rmissing.end()) {
@@ -10280,8 +10271,7 @@ int ReplicatedPG::recover_primary(int max, ThreadPool::TPHandle &handle)
       if (recovering.count(head)) {
 	++skipped;
       } else {
-	int r = recover_missing(
-	  soid, need, get_recovery_op_priority(), h);
+	int r = recover_missing(soid, need, get_recovery_op_priority());
 	switch (r) {
 	case PULL_YES:
 	  ++started;
@@ -10294,8 +10284,6 @@ int ReplicatedPG::recover_primary(int max, ThreadPool::TPHandle &handle)
 	default:
 	  assert(0);
 	}
-	if (started >= max)
-	  break;
       }
     }
     
@@ -10304,13 +10292,12 @@ int ReplicatedPG::recover_primary(int max, ThreadPool::TPHandle &handle)
       pg_log.set_last_requested(v);
   }
  
-  pgbackend->run_recovery_op(h, get_recovery_op_priority());
+  // pgbackend->run_recovery_op(h, get_recovery_op_priority());
   return started;
 }
 
 int ReplicatedPG::prep_object_replica_pushes(
-  const hobject_t& soid, eversion_t v,
-  PGBackend::RecoveryHandle *h)
+  const hobject_t& soid, eversion_t v)
 {
   assert(is_primary());
   dout(10) << __func__ << ": on " << soid << dendl;
@@ -10355,29 +10342,14 @@ int ReplicatedPG::prep_object_replica_pushes(
   start_recovery_op(soid);
   assert(!recovering.count(soid));
   recovering.insert(make_pair(soid, obc));
-
-  /* We need this in case there is an in progress write on the object.  In fact,
-   * the only possible write is an update to the xattr due to a lost_revert --
-   * a client write would be blocked since the object is degraded.
-   * In almost all cases, therefore, this lock should be uncontended.
-   */
-  obc->ondisk_read_lock();
-  pgbackend->recover_object(
-    soid,
-    v,
-    ObjectContextRef(),
-    obc, // has snapset context
-    h);
-  obc->ondisk_read_unlock();
+  osd->queue_for_background_io(this, ObjectRecovery(soid, v, ObjectContextRef(), obc));
   return 1;
 }
 
-int ReplicatedPG::recover_replicas(int max, ThreadPool::TPHandle &handle)
+int ReplicatedPG::recover_replicas(ThreadPool::TPHandle &handle)
 {
-  dout(10) << __func__ << "(" << max << ")" << dendl;
+  dout(10) << __func__ << dendl;
   int started = 0;
-
-  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
 
   // this is FAR from an optimal recovery order.  pretty lame, really.
   assert(!actingbackfill.empty());
@@ -10398,7 +10370,7 @@ int ReplicatedPG::recover_replicas(int max, ThreadPool::TPHandle &handle)
     // oldest first!
     const pg_missing_t &m(pm->second);
     for (map<version_t, hobject_t>::const_iterator p = m.rmissing.begin();
-	   p != m.rmissing.end() && started < max;
+	   p != m.rmissing.end();
 	   ++p) {
       handle.reset_tp_timeout();
       const hobject_t soid(p->second);
@@ -10441,12 +10413,10 @@ int ReplicatedPG::recover_replicas(int max, ThreadPool::TPHandle &handle)
 
       dout(10) << __func__ << ": recover_object_replicas(" << soid << ")" << dendl;
       map<hobject_t,pg_missing_t::item, hobject_t::ComparatorWithDefault>::const_iterator r = m.missing.find(soid);
-      started += prep_object_replica_pushes(soid, r->second.need,
-					    h);
+      started += prep_object_replica_pushes(soid, r->second.need);
     }
   }
 
-  pgbackend->run_recovery_op(h, get_recovery_op_priority());
   return started;
 }
 
@@ -10515,10 +10485,9 @@ bool ReplicatedPG::all_peer_done() const
  * update_range() again before continuing backfill.
  */
 int ReplicatedPG::recover_backfill(
-  int max,
   ThreadPool::TPHandle &handle, bool *work_started)
 {
-  dout(10) << "recover_backfill (" << max << ")"
+  dout(10) << "recover_backfill"
            << " bft=" << backfill_targets
 	   << " last_backfill_started " << last_backfill_started
 	   << " sort " << (get_sort_bitwise() ? "bitwise" : "nibblewise")
@@ -10594,7 +10563,7 @@ int ReplicatedPG::recover_backfill(
   hobject_t backfill_pos = MIN_HOBJ(backfill_info.begin,
 				    earliest_peer_backfill(),
 				    get_sort_bitwise());
-  while (ops < max) {
+  while (true) {
     if (cmp(backfill_info.begin, earliest_peer_backfill(),
 	    get_sort_bitwise()) <= 0 &&
 	!backfill_info.extends_to_end() && backfill_info.empty()) {
@@ -10785,13 +10754,11 @@ int ReplicatedPG::recover_backfill(
     pending_backfill_updates[to_remove[i].get<0>()]; // add empty stat!
   }
 
-  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
   for (unsigned i = 0; i < to_push.size(); ++i) {
     handle.reset_tp_timeout();
     prep_backfill_object_push(to_push[i].get<0>(), to_push[i].get<1>(),
-	    to_push[i].get<2>(), to_push[i].get<3>(), h);
+	    to_push[i].get<2>(), to_push[i].get<3>());
   }
-  pgbackend->run_recovery_op(h, get_recovery_op_priority());
 
   dout(5) << "backfill_pos is " << backfill_pos << dendl;
   for (set<hobject_t, hobject_t::Comparator>::iterator i = backfills_in_flight.begin();
@@ -10884,8 +10851,7 @@ int ReplicatedPG::recover_backfill(
 void ReplicatedPG::prep_backfill_object_push(
   hobject_t oid, eversion_t v,
   ObjectContextRef obc,
-  vector<pg_shard_t> peers,
-  PGBackend::RecoveryHandle *h)
+  vector<pg_shard_t> peers)
 {
   dout(10) << "push_backfill_object " << oid << " v " << v << " to peers " << peers << dendl;
   assert(!peers.empty());
@@ -10901,16 +10867,7 @@ void ReplicatedPG::prep_backfill_object_push(
 
   start_recovery_op(oid);
   recovering.insert(make_pair(oid, obc));
-
-  // We need to take the read_lock here in order to flush in-progress writes
-  obc->ondisk_read_lock();
-  pgbackend->recover_object(
-    oid,
-    v,
-    ObjectContextRef(),
-    obc,
-    h);
-  obc->ondisk_read_unlock();
+  osd->queue_for_background_io(this, ObjectRecovery(oid, v, ObjectContextRef(), obc));
 }
 
 void ReplicatedPG::update_range(
@@ -11026,6 +10983,20 @@ void ReplicatedPG::scan_range(
       dout(20) << "  " << *p << " " << oi.version << dendl;
     }
   }
+}
+
+void ReplicatedPG::object_recovery(const hobject_t &hoid, eversion_t v,
+                                   ObjectContextRef head, ObjectContextRef obc)
+{
+  dout(10) << __func__ << " recover object " << hoid << " v " << v << dendl;
+  PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
+  // take the read lock for push
+  if (head == ObjectContextRef() && obc != ObjectContextRef())
+    obc->ondisk_read_lock();
+  pgbackend->recover_object(hoid, v, head, obc, h);
+  if (head == ObjectContextRef() && obc != ObjectContextRef())
+    obc->ondisk_read_unlock();
+  pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
 }
 
 

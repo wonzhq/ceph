@@ -24,7 +24,8 @@ libosd_a_SOURCES = \
 	osd/OpRequest.cc \
 	osd/SnapMapper.cc \
 	osd/ScrubStore.cc \
-	objclass/class_api.cc
+	objclass/class_api.cc \
+        common/LeakyBucketThrottle.cc
 
 libosd_a_CXXFLAGS = ${AM_CXXFLAGS}
 libosd_a_LIBADD =
@@ -51,7 +52,8 @@ noinst_HEADERS += \
 	osd/ECTransaction.h \
 	osd/Watch.h \
 	osd/ScrubStore.h \
-	osd/osd_types.h
+	osd/osd_types.h \
+        common/LeakyBucketThrottle.h
 
 endif # WITH_OSD
 endif # ENABLE_SERVER
