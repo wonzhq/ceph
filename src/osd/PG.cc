@@ -1216,9 +1216,10 @@ void PG::calc_replicated_acting(
       continue;
     const pg_info_t &cur_info = all_info.find(up_cand)->second;
     if (cur_info.is_incomplete() ||
-      cur_info.last_update < MIN(
-	primary->second.log_tail,
-	auth_log_shard->second.log_tail)) {
+	(cur_info.is_empty() && !primary->second.is_empty()) ||
+	cur_info.last_update < MIN(
+	  primary->second.log_tail,
+	  auth_log_shard->second.log_tail)) {
       /* We include auth_log_shard->second.log_tail because in GetLog,
        * we will request logs back to the min last_update over our
        * acting_backfill set, which will result in our log being extended
@@ -1267,6 +1268,7 @@ void PG::calc_replicated_acting(
 
       const pg_info_t &cur_info = all_info.find(acting_cand)->second;
       if (cur_info.is_incomplete() ||
+	  (cur_info.is_empty() && !primary->second.is_empty()) ||
           cur_info.last_update < primary->second.log_tail) {
         ss << " shard " << acting_cand << " (stray) REJECTED "
                  << cur_info << std::endl;
@@ -1309,6 +1311,7 @@ void PG::calc_replicated_acting(
       const pg_info_t &cur_info = i->second->second;
 
       if (cur_info.is_incomplete() ||
+	  (cur_info.is_empty() && !primary->second.is_empty()) ||
           cur_info.last_update < primary->second.log_tail) {
         ss << " shard " << acting_cand << " (stray) REJECTED "
            << cur_info << std::endl;
